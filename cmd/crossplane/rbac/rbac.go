@@ -14,16 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package rbac implements Crossplane's RBAC controller manager.
 package rbac
 
 import (
-	"strings"
 	"time"
 
 	"github.com/alecthomas/kong"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"github.com/crossplane/crossplane-runtime/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
@@ -32,27 +33,16 @@ import (
 
 	"github.com/crossplane/crossplane/internal/controller/rbac"
 	rbaccontroller "github.com/crossplane/crossplane/internal/controller/rbac/controller"
-)
-
-// Available RBAC management policies.
-const (
-	ManagementPolicyAll   = string(rbaccontroller.ManagementPolicyAll)
-	ManagementPolicyBasic = string(rbaccontroller.ManagementPolicyBasic)
+	"github.com/crossplane/crossplane/internal/xpkg"
 )
 
 // KongVars represent the kong variables associated with the CLI parser
 // required for the RBAC enum interpolation.
-var KongVars = kong.Vars{
-	"rbac_manage_default_var": ManagementPolicyAll,
-	"rbac_manage_enum_var": strings.Join(
-		[]string{
-			ManagementPolicyAll,
-			ManagementPolicyBasic,
-		},
-		", "),
+var KongVars = kong.Vars{ //nolint:gochecknoglobals // We treat these as constants.
+	"rbac_default_registry": xpkg.DefaultRegistry,
 }
 
-// Command runs the crossplane RBAC controllers
+// Command runs the crossplane RBAC controllers.
 type Command struct {
 	Start startCommand `cmd:"" help:"Start Crossplane RBAC controllers."`
 	Init  initCommand  `cmd:"" help:"Initialize RBAC Manager."`
@@ -66,19 +56,19 @@ func (c *Command) Run() error {
 }
 
 type startCommand struct {
-	ProviderClusterRole string `name:"provider-clusterrole" help:"A ClusterRole enumerating the permissions provider packages may request."`
-	LeaderElection      bool   `name:"leader-election" short:"l" help:"Use leader election for the conroller manager." env:"LEADER_ELECTION"`
-	ManagementPolicy    string `name:"manage" short:"m" help:"RBAC management policy." default:"${rbac_manage_default_var}" enum:"${rbac_manage_enum_var}"`
+	Profile string `help:"Serve runtime profiling data via HTTP at /debug/pprof." placeholder:"host:port"`
 
-	SyncInterval     time.Duration `short:"s" help:"How often all resources will be double-checked for drift from the desired state." default:"1h"`
-	PollInterval     time.Duration `help:"How often individual resources will be checked for drift from the desired state." default:"1m"`
-	MaxReconcileRate int           `help:"The global maximum rate per second at which resources may checked for drift from the desired state." default:"10"`
+	ProviderClusterRole string `help:"A ClusterRole enumerating the permissions provider packages may request." name:"provider-clusterrole"`
+	LeaderElection      bool   `env:"LEADER_ELECTION"                                                           help:"Use leader election for the controller manager." name:"leader-election"                                                    short:"l"`
+	Registry            string `default:"${rbac_default_registry}"                                              env:"REGISTRY"                                         help:"Default registry used to fetch packages when not specified in tag." short:"r"`
+
+	SyncInterval     time.Duration `default:"1h" help:"How often all resources will be double-checked for drift from the desired state."                    short:"s"`
+	PollInterval     time.Duration `default:"1m" help:"How often individual resources will be checked for drift from the desired state."`
+	MaxReconcileRate int           `default:"10" help:"The global maximum rate per second at which resources may checked for drift from the desired state."`
 }
 
 // Run the RBAC manager.
 func (c *startCommand) Run(s *runtime.Scheme, log logging.Logger) error {
-	log.Debug("Starting", "policy", c.ManagementPolicy)
-
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return errors.Wrap(err, "cannot get config")
@@ -89,7 +79,10 @@ func (c *startCommand) Run(s *runtime.Scheme, log logging.Logger) error {
 		LeaderElection:             c.LeaderElection,
 		LeaderElectionID:           "crossplane-leader-election-rbac",
 		LeaderElectionResourceLock: resourcelock.LeasesResourceLock,
-		SyncPeriod:                 &c.SyncInterval,
+		Cache: cache.Options{
+			SyncPeriod: &c.SyncInterval,
+		},
+		PprofBindAddress: c.Profile,
 	})
 	if err != nil {
 		return errors.Wrap(err, "cannot create manager")
@@ -103,7 +96,7 @@ func (c *startCommand) Run(s *runtime.Scheme, log logging.Logger) error {
 			GlobalRateLimiter:       ratelimiter.NewGlobal(c.MaxReconcileRate),
 		},
 		AllowClusterRole: c.ProviderClusterRole,
-		ManagementPolicy: rbaccontroller.ManagementPolicy(c.ManagementPolicy),
+		DefaultRegistry:  c.Registry,
 	}
 
 	if err := rbac.Setup(mgr, o); err != nil {

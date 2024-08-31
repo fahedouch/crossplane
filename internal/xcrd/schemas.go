@@ -16,7 +16,10 @@ limitations under the License.
 
 package xcrd
 
-import extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+import (
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/utils/ptr"
+)
 
 // Label keys.
 const (
@@ -25,9 +28,12 @@ const (
 	LabelKeyClaimNamespace        = "crossplane.io/claim-namespace"
 )
 
+// CompositionRevisionRef should be propagated dynamically.
+const CompositionRevisionRef = "compositionRevisionRef"
+
 // PropagateSpecProps is the list of XRC spec properties to propagate
-// when translating an XRC into an XR and vice-versa.
-var PropagateSpecProps = []string{"compositionRef", "compositionSelector", "compositionRevisionRef", "compositionUpdatePolicy"}
+// when translating an XRC into an XR.
+var PropagateSpecProps = []string{"compositionRef", "compositionSelector", "compositionUpdatePolicy", "compositionRevisionSelector"} //nolint:gochecknoglobals // We treat this as a constant.
 
 // TODO(negz): Add descriptions to schema fields.
 
@@ -92,7 +98,19 @@ func CompositeResourceSpecProps() map[string]extv1.JSONSchemaProps {
 			Properties: map[string]extv1.JSONSchemaProps{
 				"name": {Type: "string"},
 			},
-			Description: "Alpha: This field may be deprecated or changed without notice.",
+		},
+		"compositionRevisionSelector": {
+			Type:     "object",
+			Required: []string{"matchLabels"},
+			Properties: map[string]extv1.JSONSchemaProps{
+				"matchLabels": {
+					Type: "object",
+					AdditionalProperties: &extv1.JSONSchemaPropsOrBool{
+						Allows: true,
+						Schema: &extv1.JSONSchemaProps{Type: "string"},
+					},
+				},
+			},
 		},
 		"compositionUpdatePolicy": {
 			Type: "string",
@@ -100,8 +118,6 @@ func CompositeResourceSpecProps() map[string]extv1.JSONSchemaProps {
 				{Raw: []byte(`"Automatic"`)},
 				{Raw: []byte(`"Manual"`)},
 			},
-			Default:     &extv1.JSON{Raw: []byte(`"Automatic"`)},
-			Description: "Alpha: This field may be deprecated or changed without notice.",
 		},
 		"claimRef": {
 			Type:     "object",
@@ -111,6 +127,20 @@ func CompositeResourceSpecProps() map[string]extv1.JSONSchemaProps {
 				"kind":       {Type: "string"},
 				"namespace":  {Type: "string"},
 				"name":       {Type: "string"},
+			},
+		},
+		"environmentConfigRefs": {
+			Type: "array",
+			Items: &extv1.JSONSchemaPropsOrArray{
+				Schema: &extv1.JSONSchemaProps{
+					Type: "object",
+					Properties: map[string]extv1.JSONSchemaProps{
+						"apiVersion": {Type: "string"},
+						"name":       {Type: "string"},
+						"kind":       {Type: "string"},
+					},
+					Required: []string{"apiVersion", "kind"},
+				},
 			},
 		},
 		"resourceRefs": {
@@ -126,6 +156,8 @@ func CompositeResourceSpecProps() map[string]extv1.JSONSchemaProps {
 					Required: []string{"apiVersion", "kind"},
 				},
 			},
+			// Controllers should replace the entire resourceRefs array.
+			XListType: ptr.To("atomic"),
 		},
 		"publishConnectionDetailsTo": {
 			Type:     "object",
@@ -208,13 +240,32 @@ func CompositeResourceClaimSpecProps() map[string]extv1.JSONSchemaProps {
 				"name": {Type: "string"},
 			},
 		},
+		"compositionRevisionSelector": {
+			Type:     "object",
+			Required: []string{"matchLabels"},
+			Properties: map[string]extv1.JSONSchemaProps{
+				"matchLabels": {
+					Type: "object",
+					AdditionalProperties: &extv1.JSONSchemaPropsOrBool{
+						Allows: true,
+						Schema: &extv1.JSONSchemaProps{Type: "string"},
+					},
+				},
+			},
+		},
 		"compositionUpdatePolicy": {
 			Type: "string",
 			Enum: []extv1.JSON{
 				{Raw: []byte(`"Automatic"`)},
 				{Raw: []byte(`"Manual"`)},
 			},
-			Default: &extv1.JSON{Raw: []byte(`"Automatic"`)},
+		},
+		"compositeDeletePolicy": {
+			Type: "string",
+			Enum: []extv1.JSON{
+				{Raw: []byte(`"Background"`)},
+				{Raw: []byte(`"Foreground"`)},
+			},
 		},
 		"resourceRef": {
 			Type:     "object",
@@ -281,6 +332,10 @@ func CompositeResourceStatusProps() map[string]extv1.JSONSchemaProps {
 		"conditions": {
 			Description: "Conditions of the resource.",
 			Type:        "array",
+			XListMapKeys: []string{
+				"type",
+			},
+			XListType: ptr.To("map"),
 			Items: &extv1.JSONSchemaPropsOrArray{
 				Schema: &extv1.JSONSchemaProps{
 					Type:     "object",
@@ -301,6 +356,15 @@ func CompositeResourceStatusProps() map[string]extv1.JSONSchemaProps {
 				"lastPublishedTime": {Type: "string", Format: "date-time"},
 			},
 		},
+		"claimConditionTypes": {
+			Type:      "array",
+			XListType: ptr.To("set"),
+			Items: &extv1.JSONSchemaPropsOrArray{
+				Schema: &extv1.JSONSchemaProps{
+					Type: "string",
+				},
+			},
+		},
 	}
 }
 
@@ -308,6 +372,11 @@ func CompositeResourceStatusProps() map[string]extv1.JSONSchemaProps {
 // that should exist in all generated composite resource CRDs.
 func CompositeResourcePrinterColumns() []extv1.CustomResourceColumnDefinition {
 	return []extv1.CustomResourceColumnDefinition{
+		{
+			Name:     "SYNCED",
+			Type:     "string",
+			JSONPath: ".status.conditions[?(@.type=='Synced')].status",
+		},
 		{
 			Name:     "READY",
 			Type:     "string",
@@ -331,6 +400,11 @@ func CompositeResourcePrinterColumns() []extv1.CustomResourceColumnDefinition {
 func CompositeResourceClaimPrinterColumns() []extv1.CustomResourceColumnDefinition {
 	return []extv1.CustomResourceColumnDefinition{
 		{
+			Name:     "SYNCED",
+			Type:     "string",
+			JSONPath: ".status.conditions[?(@.type=='Synced')].status",
+		},
+		{
 			Name:     "READY",
 			Type:     "string",
 			JSONPath: ".status.conditions[?(@.type=='Ready')].status",
@@ -348,7 +422,7 @@ func CompositeResourceClaimPrinterColumns() []extv1.CustomResourceColumnDefiniti
 	}
 }
 
-// GetPropFields returns the fields from a map of schema properties
+// GetPropFields returns the fields from a map of schema properties.
 func GetPropFields(props map[string]extv1.JSONSchemaProps) []string {
 	propFields := make([]string, len(props))
 	i := 0

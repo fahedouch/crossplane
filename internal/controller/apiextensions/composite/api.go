@@ -24,7 +24,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,7 +35,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
-	"github.com/crossplane/crossplane/apis/apiextensions/v1alpha1"
 	"github.com/crossplane/crossplane/internal/xcrd"
 )
 
@@ -53,11 +51,13 @@ const (
 	errUpdateComposite                 = "cannot update composite resource"
 	errCompositionNotCompatible        = "referenced composition is not compatible with this composite resource"
 	errGetXRD                          = "cannot get composite resource definition"
+	errFetchCompositionRevision        = "cannot fetch composition revision"
 )
 
 // Event reasons.
 const (
-	reasonCompositionSelection event.Reason = "CompositionSelection"
+	reasonCompositionSelection    event.Reason = "CompositionSelection"
+	reasonCompositionUpdatePolicy event.Reason = "CompositionUpdatePolicy"
 )
 
 // APIFilteredSecretPublisher publishes ConnectionDetails content after filtering
@@ -99,6 +99,8 @@ func (a *APIFilteredSecretPublisher) PublishConnection(ctx context.Context, o re
 		resource.AllowUpdateIf(func(current, desired runtime.Object) bool {
 			// We consider the update to be a no-op and don't allow it if the
 			// current and existing secret data are identical.
+
+			//nolint:forcetypeassert // These will always be secrets.
 			return !cmp.Equal(current.(*corev1.Secret).Data, desired.(*corev1.Secret).Data, cmpopts.EquateEmpty())
 		}),
 	)
@@ -120,26 +122,6 @@ func (a *APIFilteredSecretPublisher) UnpublishConnection(_ context.Context, _ re
 	return nil
 }
 
-// An APICompositionFetcher fetches the Composition referenced by a composite
-// resource.
-type APICompositionFetcher struct {
-	reader client.Reader
-}
-
-// NewAPICompositionFetcher returns a CompositionFetcher that fetches the
-// Composition referenced by a composite resource.
-func NewAPICompositionFetcher(r client.Reader) *APICompositionFetcher {
-	return &APICompositionFetcher{reader: r}
-}
-
-// Fetch the Composition referenced by the supplied composite resource. Panics
-// if the composite resource's composition reference is nil.
-func (f *APICompositionFetcher) Fetch(ctx context.Context, cr resource.Composite) (*v1.Composition, error) {
-	comp := &v1.Composition{}
-	err := f.reader.Get(ctx, meta.NamespacedNameOf(cr.GetCompositionReference()), comp)
-	return comp, errors.Wrap(err, errGetComposition)
-}
-
 // An APIRevisionFetcher selects the appropriate CompositionRevision for a
 // composite resource, fetches it, and returns it as a Composition. This is done
 // for compatibility with existing Composition logic while CompositionRevisions
@@ -154,20 +136,19 @@ func NewAPIRevisionFetcher(ca resource.ClientApplicator) *APIRevisionFetcher {
 	return &APIRevisionFetcher{ca: ca}
 }
 
-// Fetch the appropriate CompositionRevision for the supplied composite
-// resource and convert it to a Composition. Panics if the composite resource's
-// composition reference is nil, but handles setting the composition revision
-// reference.
-func (f *APIRevisionFetcher) Fetch(ctx context.Context, cr resource.Composite) (*v1.Composition, error) {
-	ref := cr.GetCompositionRevisionReference()
+// Fetch the appropriate CompositionRevision for the supplied XR. Panics if the
+// composite resource's composition reference is nil, but handles setting the
+// composition revision reference.
+func (f *APIRevisionFetcher) Fetch(ctx context.Context, cr resource.Composite) (*v1.CompositionRevision, error) {
+	current := cr.GetCompositionRevisionReference()
 	pol := cr.GetCompositionUpdatePolicy()
 
 	// We've already selected a revision, and our update policy is manual.
 	// Just fetch and return the selected revision.
-	if ref != nil && pol != nil && *pol == xpv1.UpdateManual {
-		rev := &v1alpha1.CompositionRevision{}
-		err := f.ca.Get(ctx, meta.NamespacedNameOf(ref), rev)
-		return AsComposition(rev), errors.Wrap(err, errGetCompositionRevision)
+	if current != nil && pol != nil && *pol == xpv1.UpdateManual {
+		rev := &v1.CompositionRevision{}
+		err := f.ca.Get(ctx, meta.NamespacedNameOf(current), rev)
+		return rev, errors.Wrap(err, errGetCompositionRevision)
 	}
 
 	// We either haven't yet selected a revision, or our update policy is
@@ -178,47 +159,40 @@ func (f *APIRevisionFetcher) Fetch(ctx context.Context, cr resource.Composite) (
 		return nil, errors.Wrap(err, errGetComposition)
 	}
 
-	rl := &v1alpha1.CompositionRevisionList{}
-	if err := f.ca.List(ctx, rl, client.MatchingLabels{v1alpha1.LabelCompositionName: comp.GetName()}); err != nil {
-		return nil, errors.Wrap(err, errListCompositionRevisions)
+	rl, err := f.getCompositionRevisionList(ctx, cr, comp)
+	if err != nil {
+		return nil, errors.Wrap(err, errFetchCompositionRevision)
 	}
 
-	current := currentRevision(comp, rl.Items)
-	if current == nil {
+	latest := v1.LatestRevision(comp, rl.Items)
+	if latest == nil {
 		return nil, errors.New(errNoCompatibleCompositionRevision)
 	}
 
-	if ref == nil || ref.Name != current.GetName() {
-		cr.SetCompositionRevisionReference(meta.ReferenceTo(current, v1alpha1.CompositionRevisionGroupVersionKind))
+	if current == nil || current.Name != latest.GetName() {
+		cr.SetCompositionRevisionReference(meta.ReferenceTo(latest, v1.CompositionRevisionGroupVersionKind))
 		if err := f.ca.Apply(ctx, cr); err != nil {
 			return nil, errors.Wrap(err, errUpdate)
 		}
 	}
 
-	return AsComposition(current), nil
+	return latest, nil
 }
 
-// currentRevision returns the current revision of the supplied composition. It
-// returns nil if none of the supplied revisions appear to be currentRevision.
-// We use a hash of the spec, not the revision number, to determine which
-// revision is currentRevision. This is because the Composition may have been
-// reverted to an older state. When this happens we don't create a new
-// CompositionRevision; rather the prior revision becomes effectively
-// 'currentRevision'.
-func currentRevision(c *v1.Composition, revs []v1alpha1.CompositionRevision) *v1alpha1.CompositionRevision {
-	currentHash := c.Spec.Hash()
+func (f *APIRevisionFetcher) getCompositionRevisionList(ctx context.Context, cr resource.Composite, comp *v1.Composition) (*v1.CompositionRevisionList, error) {
+	rl := &v1.CompositionRevisionList{}
+	ml := client.MatchingLabels{}
 
-	for i := range revs {
-		if !metav1.IsControlledBy(&revs[i], c) {
-			continue
-		}
-
-		if revs[i].GetLabels()[v1alpha1.LabelCompositionSpecHash] == currentHash {
-			return &revs[i]
-		}
+	if cr.GetCompositionUpdatePolicy() != nil && *cr.GetCompositionUpdatePolicy() == xpv1.UpdateAutomatic &&
+		cr.GetCompositionRevisionSelector() != nil {
+		ml = cr.GetCompositionRevisionSelector().MatchLabels
 	}
 
-	return nil
+	ml[v1.LabelCompositionName] = comp.GetName()
+	if err := f.ca.List(ctx, rl, ml); err != nil {
+		return nil, errors.Wrap(err, errListCompositionRevisions)
+	}
+	return rl, nil
 }
 
 // NewCompositionSelectorChain returns a new CompositionSelectorChain.
@@ -287,8 +261,7 @@ func (r *APILabelSelectorResolver) SelectComposition(ctx context.Context, cp res
 		return errors.New(errNoCompatibleComposition)
 	}
 
-	// We don't need this choice to be cryptographically random.
-	random := rand.New(rand.NewSource(time.Now().UnixNano())) // nolint:gosec
+	random := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // We don't need this to be cryptographically random.
 	selected := candidates[random.Intn(len(candidates))]
 	cp.SetCompositionReference(&corev1.ObjectReference{Name: selected})
 	return errors.Wrap(r.client.Update(ctx, cp), errUpdateComposite)
@@ -367,9 +340,9 @@ type ConfiguratorChain struct {
 }
 
 // Configure calls Configure function of every Configurator in the list.
-func (cc *ConfiguratorChain) Configure(ctx context.Context, cp resource.Composite, comp *v1.Composition) error {
+func (cc *ConfiguratorChain) Configure(ctx context.Context, cp resource.Composite, rev *v1.CompositionRevision) error {
 	for _, c := range cc.list {
-		if err := c.Configure(ctx, cp, comp); err != nil {
+		if err := c.Configure(ctx, cp, rev); err != nil {
 			return err
 		}
 	}
@@ -390,19 +363,19 @@ type APIConfigurator struct {
 
 // Configure any required fields that were omitted from the composite resource
 // by copying them from its composition.
-func (c *APIConfigurator) Configure(ctx context.Context, cp resource.Composite, comp *v1.Composition) error {
+func (c *APIConfigurator) Configure(ctx context.Context, cp resource.Composite, rev *v1.CompositionRevision) error {
 	apiVersion, kind := cp.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
-	if comp.Spec.CompositeTypeRef.APIVersion != apiVersion || comp.Spec.CompositeTypeRef.Kind != kind {
+	if rev.Spec.CompositeTypeRef.APIVersion != apiVersion || rev.Spec.CompositeTypeRef.Kind != kind {
 		return errors.New(errCompositionNotCompatible)
 	}
 
-	if cp.GetWriteConnectionSecretToReference() != nil || comp.Spec.WriteConnectionSecretsToNamespace == nil {
+	if cp.GetWriteConnectionSecretToReference() != nil || rev.Spec.WriteConnectionSecretsToNamespace == nil {
 		return nil
 	}
 
 	cp.SetWriteConnectionSecretToReference(&xpv1.SecretReference{
 		Name:      string(cp.GetUID()),
-		Namespace: *comp.Spec.WriteConnectionSecretsToNamespace,
+		Namespace: *rev.Spec.WriteConnectionSecretsToNamespace,
 	})
 
 	return errors.Wrap(c.client.Update(ctx, cp), errUpdateComposite)
@@ -421,7 +394,7 @@ type APINamingConfigurator struct {
 }
 
 // Configure the supplied composite resource's root name prefix.
-func (c *APINamingConfigurator) Configure(ctx context.Context, cp resource.Composite, _ *v1.Composition) error {
+func (c *APINamingConfigurator) Configure(ctx context.Context, cp resource.Composite, _ *v1.CompositionRevision) error {
 	if cp.GetLabels()[xcrd.LabelKeyNamePrefixForComposed] != "" {
 		return nil
 	}

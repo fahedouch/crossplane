@@ -14,9 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package main implements Crossplane's controller managers.
 package main
 
 import (
+	"fmt"
+	"io"
+
 	"github.com/alecthomas/kong"
 	admv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,17 +34,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
+
 	"github.com/crossplane/crossplane/apis"
 	"github.com/crossplane/crossplane/cmd/crossplane/core"
 	"github.com/crossplane/crossplane/cmd/crossplane/rbac"
+	"github.com/crossplane/crossplane/internal/version"
 )
 
-type debugFlag bool
+type (
+	debugFlag   bool
+	versionFlag bool
+)
 
-var cli struct {
-	Debug debugFlag `short:"d" help:"Print verbose logging statements."`
+type cli struct {
+	Debug debugFlag `help:"Print verbose logging statements." short:"d"`
 
-	Core core.Command `cmd:"" help:"Start core Crossplane controllers." default:"1"`
+	Version versionFlag `help:"Print version and quit." short:"v"`
+
+	Core core.Command `cmd:"" default:"withargs"                                help:"Start core Crossplane controllers."`
 	Rbac rbac.Command `cmd:"" help:"Start Crossplane RBAC Manager controllers."`
 }
 
@@ -49,7 +60,7 @@ var cli struct {
 // This method requires unparam lint exception as Kong expects
 // an error value in return from Hook methods but in our case
 // there are no error introducing steps.
-func (d debugFlag) BeforeApply(ctx *kong.Context) error { // nolint:unparam
+func (d debugFlag) BeforeApply(ctx *kong.Context) error { //nolint:unparam // BeforeApply requires this signature.
 	zl := zap.New(zap.UseDevMode(true)).WithName("crossplane")
 	// BindTo uses reflect.TypeOf to get reflection type of used interface
 	// A *logging.Logger value here is used to find the reflection type here.
@@ -59,11 +70,25 @@ func (d debugFlag) BeforeApply(ctx *kong.Context) error { // nolint:unparam
 	// *very* verbose even at info level, so we only provide it a real
 	// logger when we're running in debug mode.
 	ctrl.SetLogger(zl)
+	logging.SetFilteredKlogLogger(zl)
+	return nil
+}
+
+func (v versionFlag) BeforeApply(app *kong.Kong) error { //nolint:unparam // BeforeApply requires this signature.
+	_, _ = fmt.Fprintln(app.Stdout, version.New().GetVersionString())
+	app.Exit(0)
 	return nil
 }
 
 func main() {
 	zl := zap.New().WithName("crossplane")
+	logging.SetFilteredKlogLogger(zl)
+
+	// Setting the controller-runtime logger to a no-op logger by default,
+	// unless debug mode is enabled. This is because the controller-runtime
+	// logger is *very* verbose even at info level. This is not really needed,
+	// but otherwise we get a warning from the controller-runtime.
+	ctrl.SetLogger(zap.New(zap.WriteTo(io.Discard)))
 
 	// Note that the controller managers scheme must be a superset of the
 	// package manager's object scheme; it must contain all object types that
@@ -72,7 +97,7 @@ func main() {
 	// objects.
 	s := runtime.NewScheme()
 
-	ctx := kong.Parse(&cli,
+	ctx := kong.Parse(&cli{},
 		kong.Name("crossplane"),
 		kong.Description("An open source multicloud control plane."),
 		kong.BindTo(logging.NewLogrLogger(zl), (*logging.Logger)(nil)),

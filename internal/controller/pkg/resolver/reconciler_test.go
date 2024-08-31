@@ -18,6 +18,7 @@ package resolver
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -25,10 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
@@ -41,6 +44,7 @@ import (
 
 func TestReconcile(t *testing.T) {
 	errBoom := errors.New("boom")
+	testLog := logging.NewLogrLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.Discard)).WithName("testlog"))
 
 	type args struct {
 		mgr manager.Manager
@@ -161,7 +165,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, errBoom
 							},
 						}
@@ -197,7 +201,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, nil
 							},
 							MockSort: func() ([]string, error) {
@@ -236,7 +240,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, nil
 							},
 							MockSort: func() ([]string, error) {
@@ -275,7 +279,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return []dag.Node{
 									&v1beta1.Dependency{
 										Package: "not.a.valid.package",
@@ -318,7 +322,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return []dag.Node{
 									&v1beta1.Dependency{
 										Package:     "hasheddan/config-nop-b",
@@ -365,7 +369,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return []dag.Node{
 									&v1beta1.Dependency{
 										Package:     "hasheddan/config-nop-b",
@@ -413,7 +417,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return []dag.Node{
 									&v1beta1.Dependency{
 										Package:     "hasheddan/config-nop-c",
@@ -462,7 +466,7 @@ func TestReconcile(t *testing.T) {
 				rec: []ReconcilerOption{
 					WithNewDagFn(func() dag.DAG {
 						return &fakedag.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return []dag.Node{
 									&v1beta1.Dependency{
 										Package:     "hasheddan/config-nop-c",
@@ -489,7 +493,7 @@ func TestReconcile(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewReconciler(tc.args.mgr, tc.args.rec...)
+			r := NewReconciler(tc.args.mgr, append(tc.args.rec, WithLogger(testLog))...)
 			got, err := r.Reconcile(context.Background(), reconcile.Request{})
 
 			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {

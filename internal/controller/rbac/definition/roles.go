@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
+
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 )
 
@@ -48,13 +49,16 @@ const (
 
 	valTrue = "true"
 
-	suffixStatus = "/status"
+	suffixStatus     = "/status"
+	suffixFinalizers = "/finalizers"
 )
 
+//nolint:gochecknoglobals // We treat these as constants.
 var (
 	verbsEdit   = []string{rbacv1.VerbAll}
 	verbsView   = []string{"get", "list", "watch"}
 	verbsBrowse = []string{"get", "list", "watch"}
+	verbsUpdate = []string{"update"}
 )
 
 // RenderClusterRoles returns ClusterRoles for the supplied XRD.
@@ -74,6 +78,17 @@ func RenderClusterRoles(d *v1.CompositeResourceDefinition) []rbacv1.ClusterRole 
 					d.Spec.Names.Plural + suffixStatus,
 				},
 				Verbs: verbsEdit,
+			},
+			{
+				// Crossplane reconciles an XR by creating one or more composed resources.
+				// These composed resources are controlled (in the owner reference sense) by the XR.
+				// Crossplane needs permission to set finalizers on XRs in order to create resources
+				// that block their deletion when the OwnerReferencesPermissionEnforcement admission controller is enabled.
+				APIGroups: []string{d.Spec.Group},
+				Resources: []string{
+					d.Spec.Names.Plural + suffixFinalizers,
+				},
+				Verbs: verbsUpdate,
 			},
 		},
 	}
@@ -96,8 +111,11 @@ func RenderClusterRoles(d *v1.CompositeResourceDefinition) []rbacv1.ClusterRole 
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{d.Spec.Group},
-				Resources: []string{d.Spec.Names.Plural},
-				Verbs:     verbsEdit,
+				Resources: []string{
+					d.Spec.Names.Plural,
+					d.Spec.Names.Plural + suffixStatus,
+				},
+				Verbs: verbsEdit,
 			},
 		},
 	}
@@ -115,8 +133,11 @@ func RenderClusterRoles(d *v1.CompositeResourceDefinition) []rbacv1.ClusterRole 
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{d.Spec.Group},
-				Resources: []string{d.Spec.Names.Plural},
-				Verbs:     verbsView,
+				Resources: []string{
+					d.Spec.Names.Plural,
+					d.Spec.Names.Plural + suffixStatus,
+				},
+				Verbs: verbsView,
 			},
 		},
 	}
@@ -133,8 +154,11 @@ func RenderClusterRoles(d *v1.CompositeResourceDefinition) []rbacv1.ClusterRole 
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{d.Spec.Group},
-				Resources: []string{d.Spec.Names.Plural},
-				Verbs:     verbsBrowse,
+				Resources: []string{
+					d.Spec.Names.Plural,
+					d.Spec.Names.Plural + suffixStatus,
+				},
+				Verbs: verbsBrowse,
 			},
 		},
 	}
@@ -147,18 +171,34 @@ func RenderClusterRoles(d *v1.CompositeResourceDefinition) []rbacv1.ClusterRole 
 				d.Spec.ClaimNames.Plural + suffixStatus,
 			},
 			Verbs: verbsEdit,
-		})
+		},
+			rbacv1.PolicyRule{
+				// Crossplane needs permission to set finalizers on Claims in order to create resources
+				// that block their deletion when the OwnerReferencesPermissionEnforcement admission controller is enabled.
+				APIGroups: []string{d.Spec.Group},
+				Resources: []string{
+					d.Spec.ClaimNames.Plural + suffixFinalizers,
+				},
+				Verbs: verbsUpdate,
+			},
+		)
 
 		edit.Rules = append(edit.Rules, rbacv1.PolicyRule{
 			APIGroups: []string{d.Spec.Group},
-			Resources: []string{d.Spec.ClaimNames.Plural},
-			Verbs:     verbsEdit,
+			Resources: []string{
+				d.Spec.ClaimNames.Plural,
+				d.Spec.ClaimNames.Plural + suffixStatus,
+			},
+			Verbs: verbsEdit,
 		})
 
 		view.Rules = append(view.Rules, rbacv1.PolicyRule{
 			APIGroups: []string{d.Spec.Group},
-			Resources: []string{d.Spec.ClaimNames.Plural},
-			Verbs:     verbsView,
+			Resources: []string{
+				d.Spec.ClaimNames.Plural,
+				d.Spec.ClaimNames.Plural + suffixStatus,
+			},
+			Verbs: verbsView,
 		})
 
 		// The browse role only includes composite resources; not claims.

@@ -20,20 +20,19 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	corev1 "k8s.io/api/core/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/claim"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
+
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 )
 
-var (
-	_ handler.EventHandler = &EnqueueRequestForClaim{}
-)
+var _ handler.EventHandler = &EnqueueRequestForClaim{}
 
 func TestOffersClaim(t *testing.T) {
 	cases := map[string]struct {
@@ -41,6 +40,10 @@ func TestOffersClaim(t *testing.T) {
 		want bool
 	}{
 		"NotAnXRD": {
+			want: false,
+		},
+		"CRD": {
+			obj:  &extv1.CustomResourceDefinition{},
 			want: false,
 		},
 		"DoesNotOfferClaim": {
@@ -62,15 +65,67 @@ func TestOffersClaim(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := OffersClaim()(tc.obj)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("OffersClaim(...): -want, +got:\n%s", diff)
+				t.Errorf("\n%s\nOffersClaim(...): -want, +got:\n%s", name, diff)
 			}
 		})
 	}
 }
 
-type addFn func(item interface{})
+func TestIsClaimCRD(t *testing.T) {
+	cases := map[string]struct {
+		obj  runtime.Object
+		want bool
+	}{
+		"NotCRD": {
+			want: false,
+		},
+		"XRD": {
+			obj:  &v1.CompositeResourceDefinition{},
+			want: false,
+		},
+		"ClaimCRD": {
+			obj: &extv1.CustomResourceDefinition{
+				Spec: extv1.CustomResourceDefinitionSpec{
+					Names: extv1.CustomResourceDefinitionNames{
+						Categories: []string{
+							"claim",
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		"CompositeCRD": {
+			obj: &extv1.CustomResourceDefinition{
+				Spec: extv1.CustomResourceDefinitionSpec{
+					Names: extv1.CustomResourceDefinitionNames{
+						Categories: []string{
+							"composite",
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		"OtherCRD": {
+			obj:  &extv1.CustomResourceDefinition{},
+			want: false,
+		},
+	}
 
-func (fn addFn) Add(item interface{}) {
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := IsClaimCRD()(tc.obj)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("\n%s\nIsClaimCRD(...): -want, +got:\n%s", name, diff)
+			}
+		})
+	}
+}
+
+type addFn func(item any)
+
+func (fn addFn) Add(item any) {
 	fn(item)
 }
 
@@ -83,19 +138,19 @@ func TestAddClaim(t *testing.T) {
 		queue adder
 	}{
 		"ObjectIsNotAComposite": {
-			queue: addFn(func(_ interface{}) { t.Errorf("queue.Add() called unexpectedly") }),
+			queue: addFn(func(_ any) { t.Errorf("queue.Add() called unexpectedly") }),
 		},
 		"ObjectHasNilClaimReference": {
 			obj:   composite.New(),
-			queue: addFn(func(_ interface{}) { t.Errorf("queue.Add() called unexpectedly") }),
+			queue: addFn(func(_ any) { t.Errorf("queue.Add() called unexpectedly") }),
 		},
 		"ObjectHasClaimReference": {
 			obj: func() runtime.Object {
 				cp := composite.New()
-				cp.SetClaimReference(&corev1.ObjectReference{Namespace: ns, Name: name})
+				cp.SetClaimReference(&claim.Reference{Namespace: ns, Name: name})
 				return &cp.Unstructured
 			}(),
-			queue: addFn(func(got interface{}) {
+			queue: addFn(func(got any) {
 				want := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}
 				if diff := cmp.Diff(want, got); diff != "" {
 					t.Errorf("-want, +got:\n%s", diff)

@@ -14,21 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package binding implements the RBAC manager's support for providers.
 package binding
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
+	"github.com/google/go-cmp/cmp"
+	appsv1 "k8s.io/api/apps/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/event"
@@ -46,7 +50,7 @@ const (
 	timeout = 2 * time.Minute
 
 	errGetPR        = "cannot get ProviderRevision"
-	errListSAs      = "cannot list ServiceAccounts"
+	errDeployments  = "cannot list Deployments"
 	errApplyBinding = "cannot apply ClusterRoleBinding"
 
 	kindClusterRole = "ClusterRole"
@@ -71,9 +75,9 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		Named(name).
 		For(&v1.ProviderRevision{}).
 		Owns(&rbacv1.ClusterRoleBinding{}).
-		Watches(&source.Kind{Type: &corev1.ServiceAccount{}}, &handler.EnqueueRequestForOwner{OwnerType: &v1.ProviderRevision{}}).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &v1.ProviderRevision{})).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
+		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
 }
 
 // ReconcilerOption is used to configure the Reconciler.
@@ -131,7 +135,6 @@ type Reconciler struct {
 // Reconcile a ProviderRevision by creating a ClusterRoleBinding that binds a
 // provider's service account to its system ClusterRole.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-
 	log := r.log.WithValues("request", req)
 	log.Debug("Reconciling")
 
@@ -153,32 +156,42 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		"name", pr.GetName(),
 	)
 
+	// Check the pause annotation and return if it has the value "true"
+	// after logging, publishing an event and updating the SYNC status condition
+	if meta.IsPaused(pr) {
+		return reconcile.Result{}, nil
+	}
+
 	if meta.WasDeleted(pr) {
 		// There's nothing to do if our PR is being deleted. Any ClusterRoles
 		// we created will be garbage collected by Kubernetes.
 		return reconcile.Result{Requeue: false}, nil
 	}
 
-	l := &corev1.ServiceAccountList{}
+	l := &appsv1.DeploymentList{}
 	if err := r.client.List(ctx, l); err != nil {
-		log.Debug(errListSAs, "error", err)
-		err = errors.Wrap(err, errListSAs)
+		err = errors.Wrap(err, errDeployments)
 		r.record.Event(pr, event.Warning(reasonBind, err))
 		return reconcile.Result{}, err
 	}
 
-	// Filter down to the ServiceAccounts that are owned by this
+	// Filter down to the Deployments that are owned by this
 	// ProviderRevision. Each revision should control at most one, but it's easy
 	// and relatively harmless for us to handle there being many.
 	subjects := make([]rbacv1.Subject, 0)
-	for _, sa := range l.Items {
-		for _, ref := range sa.GetOwnerReferences() {
+	subjectStrings := make([]string, 0)
+	for _, d := range l.Items {
+		for _, ref := range d.GetOwnerReferences() {
 			if ref.UID == pr.GetUID() {
+				sa := d.Spec.Template.Spec.ServiceAccountName
+				ns := d.Namespace
+
 				subjects = append(subjects, rbacv1.Subject{
 					Kind:      rbacv1.ServiceAccountKind,
-					Namespace: sa.GetNamespace(),
-					Name:      sa.GetName(),
+					Namespace: ns,
+					Name:      sa,
 				})
+				subjectStrings = append(subjectStrings, ns+"/"+sa)
 			}
 		}
 	}
@@ -204,15 +217,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		"subjects", subjects,
 	)
 
-	if err := r.client.Apply(ctx, rb, resource.MustBeControllableBy(pr.GetUID())); err != nil {
-		log.Debug(errApplyBinding, "error", err)
+	err := r.client.Apply(ctx, rb, resource.MustBeControllableBy(pr.GetUID()), resource.AllowUpdateIf(ClusterRoleBindingsDiffer))
+	if resource.IsNotAllowed(err) {
+		log.Debug("Skipped no-op ClusterRoleBinding apply")
+		return reconcile.Result{}, nil
+	}
+	if err != nil {
+		if kerrors.IsConflict(err) {
+			return reconcile.Result{Requeue: true}, nil
+		}
 		err = errors.Wrap(err, errApplyBinding)
 		r.record.Event(pr, event.Warning(reasonBind, err))
 		return reconcile.Result{}, err
 	}
-	log.Debug("Applied system ClusterRoleBinding")
-	r.record.Event(pr, event.Normal(reasonBind, "Bound system ClusterRole to provider ServiceAccount(s)"))
+
+	r.record.Event(pr, event.Normal(reasonBind, fmt.Sprintf("Bound system ClusterRole %q to provider ServiceAccount(s): %s", n, strings.Join(subjectStrings, ", "))))
 
 	// There's no need to requeue explicitly - we're watching all PRs.
 	return reconcile.Result{Requeue: false}, nil
+}
+
+// ClusterRoleBindingsDiffer returns true if the supplied objects are different ClusterRoleBindings. We
+// consider ClusterRoleBindings to be different if the subjects, the roleRefs, or the owner ref
+// is different.
+func ClusterRoleBindingsDiffer(current, desired runtime.Object) bool {
+	// Calling this with anything but ClusterRoleBindings is a programming
+	// error. If it happens, we probably do want to panic.
+	c := current.(*rbacv1.ClusterRoleBinding) //nolint:forcetypeassert // See above.
+	d := desired.(*rbacv1.ClusterRoleBinding) //nolint:forcetypeassert // See above.
+	return !cmp.Equal(c.Subjects, d.Subjects) || !cmp.Equal(c.RoleRef, d.RoleRef) || !cmp.Equal(c.GetOwnerReferences(), d.GetOwnerReferences())
 }

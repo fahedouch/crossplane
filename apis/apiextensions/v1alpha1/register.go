@@ -30,24 +30,33 @@ const (
 )
 
 var (
-	// SchemeGroupVersion is group version used to register these objects
+	// SchemeGroupVersion is group version used to register these objects.
 	SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
 
-	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
+	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: SchemeGroupVersion}
 
-	// AddToScheme adds all registered types to scheme
+	// AddToScheme adds all registered types to scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
 
-// Composition type metadata.
+// EnvironmentConfig type metadata.
 var (
-	CompositionRevisionKind             = reflect.TypeOf(CompositionRevision{}).Name()
-	CompositionRevisionGroupKind        = schema.GroupKind{Group: Group, Kind: CompositionRevisionKind}.String()
-	CompositionRevisionKindAPIVersion   = CompositionRevisionKind + "." + SchemeGroupVersion.String()
-	CompositionRevisionGroupVersionKind = SchemeGroupVersion.WithKind(CompositionRevisionKind)
+	EnvironmentConfigKind             = reflect.TypeOf(EnvironmentConfig{}).Name()
+	EnvironmentConfigGroupKind        = schema.GroupKind{Group: Group, Kind: EnvironmentConfigKind}.String()
+	EnvironmentConfigKindAPIVersion   = EnvironmentConfigKind + "." + SchemeGroupVersion.String()
+	EnvironmentConfigGroupVersionKind = SchemeGroupVersion.WithKind(EnvironmentConfigKind)
+)
+
+// Usage type metadata.
+var (
+	UsageKind             = reflect.TypeOf(Usage{}).Name()
+	UsageGroupKind        = schema.GroupKind{Group: Group, Kind: UsageKind}.String()
+	UsageKindAPIVersion   = UsageKind + "." + SchemeGroupVersion.String()
+	UsageGroupVersionKind = SchemeGroupVersion.WithKind(UsageKind)
 )
 
 func init() {
-	SchemeBuilder.Register(&CompositionRevision{}, &CompositionRevisionList{})
+	SchemeBuilder.Register(&EnvironmentConfig{}, &EnvironmentConfigList{})
+	SchemeBuilder.Register(&Usage{}, &UsageList{})
 }

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package claim implements composite resource claims.
 package claim
 
 import (
@@ -21,12 +22,11 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
@@ -36,9 +36,10 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
-	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/claim"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/composite"
+
+	"github.com/crossplane/crossplane/internal/names"
 )
 
 const (
@@ -46,35 +47,30 @@ const (
 	reconcileTimeout = 1 * time.Minute
 )
 
-// Reasons a composite resource claim is or is not ready.
-const (
-	ReasonWaiting = "Composite resource claim is waiting for composite resource to become Ready"
-)
-
 // Error strings.
 const (
-	errGetClaim           = "cannot get composite resource claim"
-	errGetComposite       = "cannot get referenced composite resource"
-	errDeleteComposite    = "cannot delete referenced composite resource"
-	errDeleteCDs          = "cannot delete connection details"
-	errRemoveFinalizer    = "cannot remove composite resource claim finalizer"
-	errAddFinalizer       = "cannot add composite resource claim finalizer"
-	errConfigureComposite = "cannot configure composite resource"
-	errBindComposite      = "cannot bind composite resource"
-	errApplyComposite     = "cannot apply composite resource"
-	errConfigureClaim     = "cannot configure composite resource claim"
-	errPropagateCDs       = "cannot propagate connection details from composite"
+	errGetClaim             = "cannot get claim"
+	errGetComposite         = "cannot get bound composite resource"
+	errDeleteComposite      = "cannot delete bound composite resource"
+	errDeleteCDs            = "cannot delete connection details"
+	errRemoveFinalizer      = "cannot remove finalizer from claim"
+	errAddFinalizer         = "cannot add finalizer to claim"
+	errUpgradeManagedFields = "cannot upgrade composite resource's managed fields from client-side to server-side apply"
+	errSync                 = "cannot bind and sync claim with composite resource"
+	errPropagateCDs         = "cannot propagate connection details from composite resource"
+	errUpdateClaimStatus    = "cannot update claim status"
 
-	errUpdateClaimStatus = "cannot update composite resource claim status"
+	errFmtUnbound = "refusing to operate on composite resource %q that is not bound to this claim: bound to claim %q"
 )
+
+const reconcilePausedMsg = "Reconciliation (including deletion) is paused via the pause annotation"
 
 // Event reasons.
 const (
-	reasonBind               event.Reason = "BindCompositeResource"
-	reasonDelete             event.Reason = "DeleteCompositeResource"
-	reasonCompositeConfigure event.Reason = "ConfigureCompositeResource"
-	reasonClaimConfigure     event.Reason = "ConfigureClaim"
-	reasonPropagate          event.Reason = "PropagateConnectionSecret"
+	reasonBind      event.Reason = "BindCompositeResource"
+	reasonDelete    event.Reason = "DeleteCompositeResource"
+	reasonPropagate event.Reason = "PropagateConnectionSecret"
+	reasonPaused    event.Reason = "ReconciliationPaused"
 )
 
 // ControllerName returns the recommended name for controllers that use this
@@ -83,33 +79,27 @@ func ControllerName(name string) string {
 	return "claim/" + name
 }
 
-// A Configurator configures the supplied resource, typically either populating the
-// composite with fields from the claim, or claim with fields from composite.
-type Configurator interface {
-	Configure(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
+// A ManagedFieldsUpgrader upgrades an objects managed fields from client-side
+// apply to server-side apply. This is necessary when an object was previously
+// managed using client-side apply, but should now be managed using server-side
+// apply. See https://github.com/kubernetes/kubernetes/issues/99003 for details.
+type ManagedFieldsUpgrader interface {
+	Upgrade(ctx context.Context, obj client.Object, ssaManager string) error
 }
 
-// A ConfiguratorFn configures the supplied resource, typically either populating the
-// composite with fields from the claim, or claim with fields from composite.
-type ConfiguratorFn func(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-
-// Configure the supplied resource using the supplied claim.
-func (fn ConfiguratorFn) Configure(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error {
-	return fn(ctx, cm, cp)
+// A CompositeSyncer binds and syncs the supplied claim with the supplied
+// composite resource (XR).
+type CompositeSyncer interface {
+	Sync(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured) error
 }
 
-// A Binder binds a composite resource claim to a composite resource.
-type Binder interface {
-	// Bind the supplied Claim to the supplied Composite resource.
-	Bind(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-}
+// A CompositeSyncerFn binds and syncs the supplied claim with the supplied
+// composite resource (XR).
+type CompositeSyncerFn func(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured) error
 
-// A BinderFn binds a composite resource claim to a composite resource.
-type BinderFn func(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error
-
-// Bind the supplied Claim to the supplied Composite resource.
-func (fn BinderFn) Bind(ctx context.Context, cm resource.CompositeClaim, cp resource.Composite) error {
-	return fn(ctx, cm, cp)
+// Sync the supplied claim with the supplied composite resource..
+func (fn CompositeSyncerFn) Sync(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured) error {
+	return fn(ctx, cm, xr)
 }
 
 // A ConnectionPropagator is responsible for propagating information required to
@@ -163,51 +153,65 @@ func (fn ConnectionUnpublisherFn) UnpublishConnection(ctx context.Context, so re
 	return fn(ctx, so, c)
 }
 
-// A Reconciler reconciles composite resource claims by creating exactly one kind of
-// concrete composite resource. Each composite resource claim kind should create an instance
-// of this controller for each composite resource kind they can bind to, using
-// watch predicates to ensure each controller is responsible for exactly one
-// type of resource class provisioner. Each controller must watch its subset of
-// composite resource claims and any composite resources they control.
+// A DefaultsSelector copies default values from the CompositeResourceDefinition when the corresponding field
+// in the Claim is not set.
+type DefaultsSelector interface {
+	// SelectDefaults from CompositeResourceDefinition when needed.
+	SelectDefaults(ctx context.Context, cm resource.CompositeClaim) error
+}
+
+// A DefaultsSelectorFn is responsible for copying default values from the CompositeResourceDefinition.
+type DefaultsSelectorFn func(ctx context.Context, cm resource.CompositeClaim) error
+
+// SelectDefaults copies default values from the XRD if necessary.
+func (fn DefaultsSelectorFn) SelectDefaults(ctx context.Context, cm resource.CompositeClaim) error {
+	return fn(ctx, cm)
+}
+
+// A Reconciler reconciles claims by creating exactly one kind of composite
+// resource (XR). Each claim kind should create an instance of this controller
+// for each XR kind they can bind to. Each controller must watch its subset of
+// claims and any XRs they bind to.
 type Reconciler struct {
-	client       resource.ClientApplicator
-	newClaim     func() resource.CompositeClaim
-	newComposite func() resource.Composite
+	client client.Client
+
+	gvkClaim schema.GroupVersionKind
+	gvkXR    schema.GroupVersionKind
+
+	managedFields ManagedFieldsUpgrader
 
 	// The below structs embed the set of interfaces used to implement the
-	// composite resource claim reconciler. We do this primarily for readability, so that
-	// the reconciler logic reads r.composite.Create(), r.claim.Finalize(), etc.
+	// composite resource claim reconciler. We do this primarily for
+	// readability, so that the reconciler logic reads r.composite.Sync(),
+	// r.claim.Finalize(), etc.
 	composite crComposite
 	claim     crClaim
 
-	log    logging.Logger
-	record event.Recorder
+	log          logging.Logger
+	record       event.Recorder
+	pollInterval time.Duration
 }
 
 type crComposite struct {
-	Configurator
+	CompositeSyncer
 	ConnectionPropagator
 }
 
 func defaultCRComposite(c client.Client) crComposite {
 	return crComposite{
-		Configurator:         NewAPIDryRunCompositeConfigurator(c),
+		CompositeSyncer:      NewClientSideCompositeSyncer(c, names.NewNameGenerator(c)),
 		ConnectionPropagator: NewAPIConnectionPropagator(c),
 	}
 }
 
 type crClaim struct {
 	resource.Finalizer
-	Binder
-	Configurator
 	ConnectionUnpublisher
 }
 
 func defaultCRClaim(c client.Client) crClaim {
 	return crClaim{
 		Finalizer:             resource.NewAPIFinalizer(c, finalizer),
-		Binder:                NewAPIBinder(c),
-		Configurator:          NewAPIClaimConfigurator(c),
 		ConnectionUnpublisher: NewNopConnectionUnpublisher(),
 	}
 }
@@ -215,27 +219,20 @@ func defaultCRClaim(c client.Client) crClaim {
 // A ReconcilerOption configures a Reconciler.
 type ReconcilerOption func(*Reconciler)
 
-// WithClientApplicator specifies how the Reconciler should interact with the
-// Kubernetes API.
-func WithClientApplicator(ca resource.ClientApplicator) ReconcilerOption {
+// WithManagedFieldsUpgrader specifies how the Reconciler should upgrade claim
+// and composite resource (XR) managed fields from client-side apply to
+// server-side apply.
+func WithManagedFieldsUpgrader(u ManagedFieldsUpgrader) ReconcilerOption {
 	return func(r *Reconciler) {
-		r.client = ca
+		r.managedFields = u
 	}
 }
 
-// WithCompositeConfigurator specifies how the Reconciler should configure the bound
-// composite resource.
-func WithCompositeConfigurator(cf Configurator) ReconcilerOption {
+// WithCompositeSyncer specifies how the Reconciler should sync claims with
+// composite resources (XRs).
+func WithCompositeSyncer(cs CompositeSyncer) ReconcilerOption {
 	return func(r *Reconciler) {
-		r.composite.Configurator = cf
-	}
-}
-
-// WithClaimConfigurator specifies how the Reconciler should configure the bound
-// claim resource.
-func WithClaimConfigurator(cf Configurator) ReconcilerOption {
-	return func(r *Reconciler) {
-		r.claim.Configurator = cf
+		r.composite.CompositeSyncer = cs
 	}
 }
 
@@ -252,14 +249,6 @@ func WithConnectionPropagator(p ConnectionPropagator) ReconcilerOption {
 func WithConnectionUnpublisher(u ConnectionUnpublisher) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.claim.ConnectionUnpublisher = u
-	}
-}
-
-// WithBinder specifies which Binder should be used to bind
-// resources to their claim.
-func WithBinder(b Binder) ReconcilerOption {
-	return func(r *Reconciler) {
-		r.claim.Binder = b
 	}
 }
 
@@ -285,28 +274,32 @@ func WithRecorder(er event.Recorder) ReconcilerOption {
 	}
 }
 
+// WithPollInterval specifies how long the Reconciler should wait before queueing
+// a new reconciliation after a successful reconcile. The Reconciler requeues
+// after a specified duration when it is not actively waiting for an external
+// operation, but wishes to check whether resources it does not have a watch on
+// (i.e. composed resources) need to be reconciled.
+func WithPollInterval(after time.Duration) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.pollInterval = after
+	}
+}
+
 // NewReconciler returns a Reconciler that reconciles composite resource claims of
 // the supplied CompositeClaimKind with resources of the supplied CompositeKind.
 // The returned Reconciler will apply only the ObjectMetaConfigurator by
 // default; most callers should supply one or more CompositeConfigurators to
 // configure their composite resources.
-func NewReconciler(m manager.Manager, of resource.CompositeClaimKind, with resource.CompositeKind, o ...ReconcilerOption) *Reconciler {
-	c := unstructured.NewClient(m.GetClient())
+func NewReconciler(c client.Client, of resource.CompositeClaimKind, with resource.CompositeKind, o ...ReconcilerOption) *Reconciler {
 	r := &Reconciler{
-		client: resource.ClientApplicator{
-			Client:     c,
-			Applicator: resource.NewAPIPatchingApplicator(c),
-		},
-		newClaim: func() resource.CompositeClaim {
-			return claim.New(claim.WithGroupVersionKind(schema.GroupVersionKind(of)))
-		},
-		newComposite: func() resource.Composite {
-			return composite.New(composite.WithGroupVersionKind(schema.GroupVersionKind(with)))
-		},
-		composite: defaultCRComposite(c),
-		claim:     defaultCRClaim(c),
-		log:       logging.NewNopLogger(),
-		record:    event.NewNopRecorder(),
+		client:        c,
+		gvkClaim:      schema.GroupVersionKind(of),
+		gvkXR:         schema.GroupVersionKind(with),
+		managedFields: &NopManagedFieldsUpgrader{},
+		composite:     defaultCRComposite(c),
+		claim:         defaultCRClaim(c),
+		log:           logging.NewNopLogger(),
+		record:        event.NewNopRecorder(),
 	}
 
 	for _, ro := range o {
@@ -317,20 +310,17 @@ func NewReconciler(m manager.Manager, of resource.CompositeClaimKind, with resou
 }
 
 // Reconcile a composite resource claim with a concrete composite resource.
-func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) { // nolint:gocyclo
-	// NOTE(negz): This method is well over our cyclomatic complexity goal.
-	// Be wary of adding additional complexity.
-
+func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) { //nolint:gocognit // Complexity is tough to avoid here.
 	log := r.log.WithValues("request", req)
 	log.Debug("Reconciling")
 
 	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 
-	cm := r.newClaim()
+	cm := claim.New(claim.WithGroupVersionKind(r.gvkClaim))
 	if err := r.client.Get(ctx, req.NamespacedName, cm); err != nil {
-		// There's no need to requeue if we no longer exist. Otherwise
-		// we'll be requeued implicitly because we return an error.
+		// There's no need to requeue if we no longer exist. Otherwise we'll be
+		// requeued implicitly because we return an error.
 		log.Debug(errGetClaim, "error", err)
 		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetClaim)
 	}
@@ -342,123 +332,154 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		"external-name", meta.GetExternalName(cm),
 	)
 
-	cp := r.newComposite()
+	// Check the pause annotation and return if it has the value "true" after
+	// logging, publishing an event and updating the Synced status condition.
+	if meta.IsPaused(cm) {
+		r.record.Event(cm, event.Normal(reasonPaused, reconcilePausedMsg))
+		cm.SetConditions(xpv1.ReconcilePaused().WithMessage(reconcilePausedMsg))
+		// If the pause annotation is removed, we will have a chance to
+		// reconcile again and resume and if status update fails, we will
+		// reconcile again to retry to update the status.
+		return reconcile.Result{}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+	}
+
+	xr := composite.New(composite.WithGroupVersionKind(r.gvkXR))
 	if ref := cm.GetResourceReference(); ref != nil {
 		record = record.WithAnnotations("composite-name", cm.GetResourceReference().Name)
 		log = log.WithValues("composite-name", cm.GetResourceReference().Name)
 
-		if err := r.client.Get(ctx, meta.NamespacedNameOf(ref), cp); resource.IgnoreNotFound(err) != nil {
-			log.Debug(errGetComposite, "error", err)
+		if err := r.client.Get(ctx, meta.NamespacedNameOf(ref), xr); resource.IgnoreNotFound(err) != nil {
 			err = errors.Wrap(err, errGetComposite)
 			record.Event(cm, event.Warning(reasonBind, err))
-			return reconcile.Result{}, err
+			cm.SetConditions(xpv1.ReconcileError(err))
+			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 		}
+	}
+
+	// Return early if the claim references an XR that doesn't reference it.
+	//
+	// We don't requeue in this situation because the claim will need human
+	// intervention before we can proceed (e.g. fixing the ref), and we'll be
+	// queued implicitly when the claim is edited.
+	//
+	// A claim might be able to delete an XR it's not bound to, as long as the
+	// XR is bindable but not yet bound. This is because we only check the claim
+	// ref if the XR has one - this allows us to bind unbound claims. Given that
+	// the claim could bind this XR, then be deleted and in turn delete the XR
+	// this is not an issue.
+	if ref := xr.GetClaimReference(); meta.WasCreated(xr) && ref != nil && !cmp.Equal(cm.GetReference(), ref) {
+		err := errors.Errorf(errFmtUnbound, xr.GetName(), ref.Name)
+		record.Event(cm, event.Warning(reasonBind, err))
+		cm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+	}
+
+	// TODO(negz): Remove this call to Upgrade once no supported version of
+	// Crossplane uses client-side apply to sync claims with XRs. We only need
+	// to upgrade field managers if _this controller_ might have applied the XR
+	// before using the default client-side apply field manager "crossplane",
+	// but now wants to use server-side apply instead.
+	if err := r.managedFields.Upgrade(ctx, xr, FieldOwnerXR); err != nil {
+		if kerrors.IsConflict(err) {
+			return reconcile.Result{Requeue: true}, nil
+		}
+		err = errors.Wrap(err, errUpgradeManagedFields)
+		record.Event(cm, event.Warning(reasonBind, err))
+		cm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
 	if meta.WasDeleted(cm) {
 		log = log.WithValues("deletion-timestamp", cm.GetDeletionTimestamp())
 
-		if meta.WasCreated(cp) {
-			ref := cp.GetClaimReference()
-			want := meta.ReferenceTo(cm, cm.GetObjectKind().GroupVersionKind())
-			if !cmp.Equal(want, ref, cmpopts.IgnoreFields(corev1.ObjectReference{}, "UID")) {
-				// We don't requeue (or return an error, which
-				// would requeue) in this situation because the
-				// claim will need human intervention before we
-				// can proceed (e.g. fixing the ref), and we'll
-				// be queued implicitly when the claim is
-				// edited.
-				err := errors.New("refusing to delete composite resource that is not bound to this claim")
-				log.Debug(errDeleteComposite, "error", err)
-				record.Event(cm, event.Warning(reasonDelete, err))
-				return reconcile.Result{Requeue: false}, nil
+		cm.SetConditions(xpv1.Deleting())
+		if meta.WasCreated(xr) {
+			requiresForegroundDeletion := false
+			if cdp := cm.GetCompositeDeletePolicy(); cdp != nil && *cdp == xpv1.CompositeDeleteForeground {
+				requiresForegroundDeletion = true
 			}
-
-			if err := r.client.Delete(ctx, cp); resource.IgnoreNotFound(err) != nil {
-				log.Debug(errDeleteComposite, "error", err)
+			if meta.WasDeleted(xr) && requiresForegroundDeletion {
+				log.Debug("Waiting for the XR to finish deleting (foreground deletion)")
+				return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+			}
+			do := &client.DeleteOptions{}
+			if requiresForegroundDeletion {
+				client.PropagationPolicy(metav1.DeletePropagationForeground).ApplyToDelete(do)
+			}
+			if err := r.client.Delete(ctx, xr, do); resource.IgnoreNotFound(err) != nil {
 				err = errors.Wrap(err, errDeleteComposite)
 				record.Event(cm, event.Warning(reasonDelete, err))
-				return reconcile.Result{}, err
+				cm.SetConditions(xpv1.ReconcileError(err))
+				return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 			}
-
+			if requiresForegroundDeletion {
+				log.Debug("Waiting for the XR to finish deleting (foreground deletion)")
+				return reconcile.Result{Requeue: true}, nil
+			}
 		}
 
 		// Claims do not publish connection details but may propagate XR
 		// secrets. Hence, we need to clean up propagated secrets when the
 		// claim is deleted.
 		if err := r.claim.UnpublishConnection(ctx, cm, nil); err != nil {
-			log.Debug(errDeleteCDs, "error", err)
 			err = errors.Wrap(err, errDeleteCDs)
 			record.Event(cm, event.Warning(reasonDelete, err))
-			return reconcile.Result{}, err
+			cm.SetConditions(xpv1.ReconcileError(err))
+			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 		}
 
-		log.Debug("Successfully deleted composite resource")
 		record.Event(cm, event.Normal(reasonDelete, "Successfully deleted composite resource"))
 
 		if err := r.claim.RemoveFinalizer(ctx, cm); err != nil {
-			log.Debug(errRemoveFinalizer, "error", err)
 			err = errors.Wrap(err, errRemoveFinalizer)
 			record.Event(cm, event.Warning(reasonDelete, err))
-			return reconcile.Result{}, err
+			cm.SetConditions(xpv1.ReconcileError(err))
+			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 		}
 
-		log.Debug("Successfully deleted composite resource claim")
-		return reconcile.Result{Requeue: false}, nil
+		log.Debug("Successfully deleted claim")
+		cm.SetConditions(xpv1.ReconcileSuccess())
+		return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
 	if err := r.claim.AddFinalizer(ctx, cm); err != nil {
-		log.Debug(errAddFinalizer, "error")
+		if kerrors.IsConflict(err) {
+			return reconcile.Result{Requeue: true}, nil
+		}
 		err = errors.Wrap(err, errAddFinalizer)
 		record.Event(cm, event.Warning(reasonBind, err))
-		return reconcile.Result{}, err
+		cm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	if err := r.composite.Configure(ctx, cm, cp); err != nil {
-		log.Debug(errConfigureComposite, "error", err)
-		err = errors.Wrap(err, errConfigureComposite)
-		record.Event(cm, event.Warning(reasonCompositeConfigure, err))
-		return reconcile.Result{}, err
-	}
+	// The XR's claim reference before syncing. Used to determine if we bind it.
+	before := xr.GetClaimReference()
 
-	// We'll know our composite resource's name at this point because it was
-	// set by the above configure step.
-	record = record.WithAnnotations("composite-name", cp.GetName())
-	log = log.WithValues("composite-name", cp.GetName())
-
-	// We want to make sure we bind the claim to the composite (i.e. that we
-	// set the claim's resourceRef) before we ever create the composite. We
-	// use resourceRef to determine whether or not we need to create a new
-	// composite resource. If we first created the composite then set the
-	// resourceRef we'd risk leaking composite resources, e.g. if we hit an
-	// error between when we created the composite resource and when we
-	// persisted its resourceRef.
-	if err := r.claim.Bind(ctx, cm, cp); err != nil {
-		log.Debug(errBindComposite, "error", err)
-		err = errors.Wrap(err, errBindComposite)
+	// Create (if necessary), bind, and sync an XR with the claim.
+	if err := r.composite.Sync(ctx, cm, xr); err != nil {
+		if kerrors.IsConflict(err) {
+			return reconcile.Result{Requeue: true}, nil
+		}
+		err = errors.Wrap(err, errSync)
 		record.Event(cm, event.Warning(reasonBind, err))
-		return reconcile.Result{}, err
+		cm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	if err := r.client.Apply(ctx, cp); err != nil {
-		log.Debug(errApplyComposite, "error", err)
-		err = errors.Wrap(err, errApplyComposite)
-		record.Event(cm, event.Warning(reasonCompositeConfigure, err))
-		return reconcile.Result{}, err
+	// The XR didn't reference the claim before the sync, but does now.
+	if ref := cm.GetReference(); !cmp.Equal(before, ref) && cmp.Equal(xr.GetClaimReference(), ref) {
+		record.Event(cm, event.Normal(reasonBind, "Successfully bound composite resource"))
 	}
 
-	log.Debug("Successfully applied composite resource")
-	record.Event(cm, event.Normal(reasonCompositeConfigure, "Successfully applied composite resource"))
+	cm.SetConditions(xpv1.ReconcileSuccess())
 
-	if err := r.claim.Configure(ctx, cm, cp); err != nil {
-		log.Debug(errConfigureClaim, "error", err)
-		err = errors.Wrap(err, errConfigureClaim)
-		record.Event(cm, event.Warning(reasonClaimConfigure, err))
-		return reconcile.Result{}, err
+	// Copy any custom status conditions from the XR to the claim.
+	for _, cType := range xr.GetClaimConditionTypes() {
+		c := xr.GetCondition(cType)
+		cm.SetConditions(c)
 	}
 
-	if !resource.IsConditionTrue(cp.GetCondition(xpv1.TypeReady)) {
-		log.Debug("Composite resource is not yet ready")
+	if !resource.IsConditionTrue(xr.GetCondition(xpv1.TypeReady)) {
 		record.Event(cm, event.Normal(reasonBind, "Composite resource is not yet ready"))
 
 		// We should be watching the composite resource and will have a
@@ -467,19 +488,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 
-	log.Debug("Successfully bound composite resource")
-	record.Event(cm, event.Normal(reasonBind, "Successfully bound composite resource"))
-
-	propagated, err := r.composite.PropagateConnection(ctx, cm, cp)
+	propagated, err := r.composite.PropagateConnection(ctx, cm, xr)
 	if err != nil {
-		log.Debug(errPropagateCDs, "error", err)
 		err = errors.Wrap(err, errPropagateCDs)
 		record.Event(cm, event.Warning(reasonPropagate, err))
-		return reconcile.Result{}, err
+		cm.SetConditions(xpv1.ReconcileError(err))
+		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
 	}
 	if propagated {
 		cm.SetConnectionDetailsLastPublishedTime(&metav1.Time{Time: time.Now()})
-		log.Debug("Successfully propagated connection details from composite resource")
 		record.Event(cm, event.Normal(reasonPropagate, "Successfully propagated connection details from composite resource"))
 	}
 
@@ -496,6 +513,7 @@ func Waiting() xpv1.Condition {
 		Type:               xpv1.TypeReady,
 		Status:             corev1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonWaiting,
+		Reason:             xpv1.ConditionReason("Waiting"),
+		Message:            "Claim is waiting for composite resource to become Ready",
 	}
 }

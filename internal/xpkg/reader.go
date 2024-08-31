@@ -48,8 +48,8 @@ func (g *gzipReadCloser) Read(p []byte) (n int, err error) {
 
 // Close first closes the gzip reader, then closes the underlying closer.
 func (g *gzipReadCloser) Close() error {
-	defer g.rc.Close() //nolint:errcheck
 	if err := g.gzip.Close(); err != nil {
+		_ = g.rc.Close()
 		return err
 	}
 	return g.rc.Close()
@@ -80,8 +80,8 @@ func (t *teeReadCloser) Read(b []byte) (int, error) {
 
 // Close closes the underlying ReadCloser, then the Writer for the TeeReader.
 func (t *teeReadCloser) Close() error {
-	defer t.w.Close() //nolint:errcheck
 	if err := t.r.Close(); err != nil {
+		_ = t.w.Close()
 		return err
 	}
 	return t.w.Close()
@@ -89,7 +89,7 @@ func (t *teeReadCloser) Close() error {
 
 var _ io.ReadCloser = &joinedReadCloser{}
 
-// joinedReadCloster joins a reader and a closer. It is typically used in the
+// joinedReadCloser joins a reader and a closer. It is typically used in the
 // context of a ReadCloser being wrapped by a Reader.
 type joinedReadCloser struct {
 	r io.Reader

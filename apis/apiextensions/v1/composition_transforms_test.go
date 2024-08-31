@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Crossplane Authors.
+Copyright 2023 The Crossplane Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,396 +17,400 @@ limitations under the License.
 package v1
 
 import (
-	"reflect"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 )
 
-func TestMapResolve(t *testing.T) {
+func TestTransformValidate(t *testing.T) {
 	type args struct {
-		m map[string]string
-		i interface{}
+		transform *Transform
 	}
 	type want struct {
-		o   interface{}
-		err error
+		err *field.Error
 	}
 
 	cases := map[string]struct {
-		args
-		want
+		reason string
+		args   args
+		want   want
 	}{
-		"NonStringInput": {
+		"ValidMathMultiply": {
+			reason: "Math transform with MathTransform Multiply set should be valid",
 			args: args{
-				i: 5,
-			},
-			want: want{
-				err: errors.Errorf(errFmtMapTypeNotSupported, "int"),
+				transform: &Transform{
+					Type: TransformTypeMath,
+					Math: &MathTransform{
+						Type:     MathTransformTypeMultiply,
+						Multiply: ptr.To[int64](2),
+					},
+				},
 			},
 		},
-		"KeyNotFound": {
+		"ValidMathDefaultType": {
+			reason: "Math transform with MathTransform Default set should be valid",
 			args: args{
-				i: "ola",
-			},
-			want: want{
-				err: errors.Errorf(errFmtMapNotFound, "ola"),
+				transform: &Transform{
+					Type: TransformTypeMath,
+					Math: &MathTransform{
+						Multiply: ptr.To[int64](2),
+					},
+				},
 			},
 		},
-		"Success": {
+		"ValidMathClampMin": {
+			reason: "Math transform with valid MathTransform ClampMin set should be valid",
 			args: args{
-				m: map[string]string{"ola": "voila"},
-				i: "ola",
+				transform: &Transform{
+					Type: TransformTypeMath,
+					Math: &MathTransform{
+						Type:     MathTransformTypeClampMin,
+						ClampMin: ptr.To[int64](10),
+					},
+				},
+			},
+		},
+		"InvalidMathWrongSpec": {
+			reason: "Math transform with invalid MathTransform set should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMath,
+					Math: &MathTransform{
+						Type:     MathTransformTypeMultiply,
+						ClampMin: ptr.To[int64](10),
+					},
+				},
 			},
 			want: want{
-				o: "voila",
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "math.multiply",
+				},
+			},
+		},
+		"InvalidMathNotDefinedAtAll": {
+			reason: "Math transform with no MathTransform set should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMath,
+					Math: nil,
+				},
+			},
+			want: want{
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "math",
+				},
+			},
+		},
+		"ValidMap": {
+			reason: "Map transform with MapTransform set should be valid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMap,
+					Map: &MapTransform{
+						Pairs: map[string]extv1.JSON{
+							"foo": {Raw: []byte(`"bar"`)},
+						},
+					},
+				},
+			},
+		},
+		"InvalidMapNoMap": {
+			reason: "Map transform with no map set should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMap,
+					Map:  nil,
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "map",
+				},
+			},
+		},
+		"InvalidMapNoPairs": {
+			reason: "Map transform with no pairs in map should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMap,
+					Map:  &MapTransform{},
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "map.pairs",
+				},
+			},
+		},
+		"InvalidMatchNoMatch": {
+			reason: "Match transform with no match set should be invalid",
+			args: args{
+				transform: &Transform{
+					Type:  TransformTypeMatch,
+					Match: nil,
+				},
+			},
+			want: want{
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "match",
+				},
+			},
+		},
+		"InvalidMatchEmptyTransform": {
+			reason: "Match transform with empty MatchTransform should be invalid",
+			args: args{
+				transform: &Transform{
+					Type:  TransformTypeMatch,
+					Match: &MatchTransform{},
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "match.patterns",
+				},
+			},
+		},
+		"ValidMatchTransformRegexp": {
+			reason: "Match transform with valid MatchTransform of type regexp should be valid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMatch,
+					Match: &MatchTransform{
+						Patterns: []MatchTransformPattern{
+							{
+								Type:   MatchTransformPatternTypeRegexp,
+								Regexp: ptr.To(".*"),
+							},
+						},
+					},
+				},
+			},
+		},
+		"InvalidMatchTransformRegexp": {
+			reason: "Match transform with an invalid MatchTransform of type regexp with a bad regexp should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMatch,
+					Match: &MatchTransform{
+						Patterns: []MatchTransformPattern{
+							{
+								Type:   MatchTransformPatternTypeRegexp,
+								Regexp: ptr.To("?"),
+							},
+						},
+					},
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "match.patterns[0].regexp",
+				},
+			},
+		},
+		"ValidMatchTransformString": {
+			reason: "Match transform with valid MatchTransform of type literal should be valid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMatch,
+					Match: &MatchTransform{
+						Patterns: []MatchTransformPattern{
+							{
+								Type:    MatchTransformPatternTypeLiteral,
+								Literal: ptr.To("foo"),
+							},
+							{
+								Literal: ptr.To("bar"),
+							},
+						},
+					},
+				},
+			},
+		},
+		"InvalidStringNoString": {
+			reason: "String transform with no string set should be invalid",
+			args: args{
+				transform: &Transform{
+					Type:   TransformTypeString,
+					String: nil,
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "string",
+				},
+			},
+		},
+		"ValidString": {
+			reason: "String transform with set string should be valid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeString,
+					String: &StringTransform{
+						Format: ptr.To("foo"),
+					},
+				},
+			},
+		},
+		"InvalidConvertMissingConvert": {
+			reason: "Convert transform missing Convert should be invalid",
+			args: args{
+				transform: &Transform{
+					Type:    TransformTypeConvert,
+					Convert: nil,
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "convert",
+				},
+			},
+		},
+		"InvalidConvertUnknownFormat": {
+			reason: "Convert transform with unknown format should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeConvert,
+					Convert: &ConvertTransform{
+						Format: &[]ConvertTransformFormat{"foo"}[0],
+					},
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "convert.format",
+				},
+			},
+		},
+		"InvalidConvertUnknownToType": {
+			reason: "Convert transform with unknown toType should be invalid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeConvert,
+					Convert: &ConvertTransform{
+						ToType: TransformIOType("foo"),
+					},
+				},
+			},
+			want: want{
+				err: &field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "convert.toType",
+				},
+			},
+		},
+		"ValidConvert": {
+			reason: "Convert transform with valid format and toType should be valid",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeConvert,
+					Convert: &ConvertTransform{
+						Format: &[]ConvertTransformFormat{ConvertTransformFormatNone}[0],
+						ToType: TransformIOTypeInt,
+					},
+				},
 			},
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := (&MapTransform{Pairs: tc.m}).Resolve(tc.i)
-
-			if diff := cmp.Diff(tc.want.o, got); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
-			}
-			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
+			err := tc.args.transform.Validate()
+			if diff := cmp.Diff(tc.want.err, err, cmpopts.IgnoreFields(field.Error{}, "Detail", "BadValue")); diff != "" {
+				t.Errorf("%s\nValidate(...): -want, +got:\n%s", tc.reason, diff)
 			}
 		})
 	}
 }
 
-func TestMathResolve(t *testing.T) {
-	m := int64(2)
-
+func TestTransformGetOutputType(t *testing.T) {
 	type args struct {
-		multiplier *int64
-		i          interface{}
+		transform *Transform
 	}
 	type want struct {
-		o   interface{}
-		err error
+		output *TransformIOType
+		err    error
 	}
-
 	cases := map[string]struct {
-		args
-		want
+		reason string
+		args   args
+		want   want
 	}{
-		"NoMultiplier": {
+		"MapTransform": {
+			reason: "Output of Math transform should be float64",
 			args: args{
-				i: 25,
+				transform: &Transform{
+					Type: TransformTypeMath,
+				},
 			},
 			want: want{
-				err: errors.New(errMathNoMultiplier),
+				output: &[]TransformIOType{TransformIOTypeFloat64}[0],
 			},
 		},
-		"NonNumberInput": {
+		"ConvertTransform": {
+			reason: "Output of Convert transform, no validation, should be the type specified",
 			args: args{
-				multiplier: &m,
-				i:          "ola",
+				transform: &Transform{
+					Type:    TransformTypeConvert,
+					Convert: &ConvertTransform{ToType: "fakeType"},
+				},
 			},
 			want: want{
-				err: errors.New(errMathInputNonNumber),
+				output: &[]TransformIOType{"fakeType"}[0],
 			},
 		},
-		"Success": {
+		"ErrorUnknownType": {
+			reason: "Output of Unknown transform type returns an error",
 			args: args{
-				multiplier: &m,
-				i:          3,
+				transform: &Transform{
+					Type: "fakeType",
+				},
 			},
 			want: want{
-				o: 3 * m,
+				err: fmt.Errorf("unable to get output type, unknown transform type: fakeType"),
 			},
 		},
-		"SuccessInt64": {
+		"MapTransformNil": {
+			reason: "Output of Map transform is nil",
 			args: args{
-				multiplier: &m,
-				i:          int64(3),
+				transform: &Transform{
+					Type: TransformTypeMap,
+				},
 			},
-			want: want{
-				o: 3 * m,
+		},
+		"MatchTransformNil": {
+			reason: "Output of Match transform is nil",
+			args: args{
+				transform: &Transform{
+					Type: TransformTypeMatch,
+				},
 			},
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := (&MathTransform{Multiply: tc.multiplier}).Resolve(tc.i)
-
-			if diff := cmp.Diff(tc.want.o, got); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
-			}
+			got, err := tc.args.transform.GetOutputType()
 			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
+				t.Errorf("%s\nGetOutputType(...): -want, +got:\n%s", tc.reason, diff)
 			}
-		})
-	}
-}
 
-func TestStringResolve(t *testing.T) {
-
-	type args struct {
-		stype   StringTransformType
-		fmts    *string
-		convert *StringConversionType
-		trim    *string
-		i       interface{}
-	}
-	type want struct {
-		o   interface{}
-		err error
-	}
-	sFmt := "verycool%s"
-	iFmt := "the largest %d"
-
-	var upper, lower, tobase64, frombase64, wrongConvertType StringConversionType = ConversionTypeToUpper, ConversionTypeToLower, ConversionTypeToBase64, ConversionTypeFromBase64, "Something"
-
-	prefix := "https://"
-	suffix := "-test"
-
-	cases := map[string]struct {
-		args
-		want
-	}{
-		"NotSupportedType": {
-			args: args{
-				stype: "Something",
-				i:     "value",
-			},
-			want: want{
-				err: errors.Errorf(errStringTransformTypeFailed, "Something"),
-			},
-		},
-		"FmtFailed": {
-			args: args{
-				stype: StringTransformFormat,
-				i:     "value",
-			},
-			want: want{
-				err: errors.Errorf(errStringTransformTypeFormat, string(StringTransformFormat)),
-			},
-		},
-		"FmtString": {
-			args: args{
-				stype: StringTransformFormat,
-				fmts:  &sFmt,
-				i:     "thing",
-			},
-			want: want{
-				o: "verycoolthing",
-			},
-		},
-		"FmtInteger": {
-			args: args{
-				stype: StringTransformFormat,
-				fmts:  &iFmt,
-				i:     8,
-			},
-			want: want{
-				o: "the largest 8",
-			},
-		},
-		"ConvertNotSet": {
-			args: args{
-				stype: StringTransformConvert,
-				i:     "crossplane",
-			},
-			want: want{
-				err: errors.Errorf(errStringTransformTypeConvert, string(StringTransformConvert)),
-			},
-		},
-		"ConvertTypFailed": {
-			args: args{
-				stype:   StringTransformConvert,
-				convert: &wrongConvertType,
-				i:       "crossplane",
-			},
-			want: want{
-				err: errors.Errorf(errStringConvertTypeFailed, wrongConvertType),
-			},
-		},
-		"ConvertToUpper": {
-			args: args{
-				stype:   StringTransformConvert,
-				convert: &upper,
-				i:       "crossplane",
-			},
-			want: want{
-				o: "CROSSPLANE",
-			},
-		},
-		"ConvertToLower": {
-			args: args{
-				stype:   StringTransformConvert,
-				convert: &lower,
-				i:       "CrossPlane",
-			},
-			want: want{
-				o: "crossplane",
-			},
-		},
-		"ConvertToBase64": {
-			args: args{
-				stype:   StringTransformConvert,
-				convert: &tobase64,
-				i:       "CrossPlane",
-			},
-			want: want{
-				o: "Q3Jvc3NQbGFuZQ==",
-			},
-		},
-		"ConvertFromBase64": {
-			args: args{
-				stype:   StringTransformConvert,
-				convert: &frombase64,
-				i:       "Q3Jvc3NQbGFuZQ==",
-			},
-			want: want{
-				o: "CrossPlane",
-			},
-		},
-		"ConvertFromBase64Error": {
-			args: args{
-				stype:   StringTransformConvert,
-				convert: &frombase64,
-				i:       "ThisStringIsNotBase64",
-			},
-			want: want{
-				o:   "N\x18\xacJ\xda\xe2\x9e\x02,6\x8bAjǺ",
-				err: errors.WithStack(errors.New(errDecodeString + ": illegal base64 data at input byte 20")),
-			},
-		},
-		"TrimPrefix": {
-			args: args{
-				stype: StringTransformTrimPrefix,
-				trim:  &prefix,
-				i:     "https://crossplane.io",
-			},
-			want: want{
-				o: "crossplane.io",
-			},
-		},
-		"TrimSuffix": {
-			args: args{
-				stype: StringTransformTrimSuffix,
-				trim:  &suffix,
-				i:     "my-string-test",
-			},
-			want: want{
-				o: "my-string",
-			},
-		},
-		"TrimPrefixWithoutMatch": {
-			args: args{
-				stype: StringTransformTrimPrefix,
-				trim:  &prefix,
-				i:     "crossplane.io",
-			},
-			want: want{
-				o: "crossplane.io",
-			},
-		},
-		"TrimSuffixWithoutMatch": {
-			args: args{
-				stype: StringTransformTrimSuffix,
-				trim:  &suffix,
-				i:     "my-string",
-			},
-			want: want{
-				o: "my-string",
-			},
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			got, err := (&StringTransform{Type: tc.stype,
-				Format:  tc.fmts,
-				Convert: tc.convert,
-				Trim:    tc.trim,
-			}).Resolve(tc.i)
-
-			if diff := cmp.Diff(tc.want.o, got); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
-			}
-			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
-			}
-		})
-	}
-}
-
-func TestConvertResolve(t *testing.T) {
-	type args struct {
-		ot string
-		i  interface{}
-	}
-	type want struct {
-		o   interface{}
-		err error
-	}
-
-	cases := map[string]struct {
-		args
-		want
-	}{
-		"StringToBool": {
-			args: args{
-				i:  "true",
-				ot: ConvertTransformTypeBool,
-			},
-			want: want{
-				o: true,
-			},
-		},
-		"SameTypeNoOp": {
-			args: args{
-				i:  true,
-				ot: ConvertTransformTypeBool,
-			},
-			want: want{
-				o: true,
-			},
-		},
-		"IntAliasToInt64": {
-			args: args{
-				i:  int64(1),
-				ot: ConvertTransformTypeInt,
-			},
-			want: want{
-				o: int64(1),
-			},
-		},
-		"InputTypeNotSupported": {
-			args: args{
-				i:  []int{64},
-				ot: ConvertTransformTypeString,
-			},
-			want: want{
-				err: errors.Errorf(errFmtConvertInputTypeNotSupported, reflect.TypeOf([]int{}).Kind().String()),
-			},
-		},
-		"ConversionPairNotSupported": {
-			args: args{
-				i:  "[64]",
-				ot: "[]int",
-			},
-			want: want{
-				err: errors.Errorf(errFmtConversionPairNotSupported, "string", "[]int"),
-			},
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			got, err := (&ConvertTransform{ToType: tc.args.ot}).Resolve(tc.i)
-
-			if diff := cmp.Diff(tc.want.o, got); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
-			}
-			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
-				t.Errorf("Resolve(b): -want, +got:\n%s", diff)
+			if diff := cmp.Diff(tc.want.output, got); diff != "" {
+				t.Errorf("%s\nGetOutputType(...): -want, +got:\n%s", tc.reason, diff)
 			}
 		})
 	}

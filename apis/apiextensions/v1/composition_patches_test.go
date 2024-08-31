@@ -1,11 +1,11 @@
 /*
-Copyright 2020 The Crossplane Authors.
+Copyright 2023 The Crossplane Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,991 +18,143 @@ package v1
 
 import (
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
-
-	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
-	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
-	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
-	"github.com/crossplane/crossplane-runtime/pkg/test"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 )
 
-func TestPatchApply(t *testing.T) {
-	now := metav1.NewTime(time.Unix(0, 0))
-	lpt := fake.ConnectionDetailsLastPublishedTimer{
-		Time: &now,
-	}
-
-	errNotFound := func(path string) error {
-		p := &fieldpath.Paved{}
-		_, err := p.GetValue(path)
-		return err
-	}
-
+func TestPatchValidate(t *testing.T) {
 	type args struct {
-		patch Patch
-		cp    *fake.Composite
-		cd    *fake.Composed
-		only  []PatchType
+		patch *Patch
 	}
+
 	type want struct {
-		cp  *fake.Composite
-		cd  *fake.Composed
-		err error
+		err *field.Error
 	}
 
 	cases := map[string]struct {
 		reason string
-		args
-		want
+		args   args
+		want   want
 	}{
-		"InvalidCompositeFieldPathPatch": {
-			reason: "Should return error when required fields not passed to applyFromFieldPathPatch",
+		"ValidFromCompositeFieldPath": {
+			reason: "FromCompositeFieldPath patch with FromFieldPath set should be valid",
 			args: args{
-				patch: Patch{
-					Type: PatchTypeFromCompositeFieldPath,
-				},
-				cp: &fake.Composite{
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{ObjectMeta: metav1.ObjectMeta{Name: "cd"}},
-			},
-			want: want{
-				err: errors.Errorf(errFmtRequiredField, "FromFieldPath", PatchTypeFromCompositeFieldPath),
-			},
-		},
-		"InvalidPatchType": {
-			reason: "Should return an error if an invalid patch type is specified",
-			args: args{
-				patch: Patch{
-					Type: "invalid-patchtype",
-				},
-				cp: &fake.Composite{
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{ObjectMeta: metav1.ObjectMeta{Name: "cd"}},
-			},
-			want: want{
-				err: errors.Errorf(errFmtInvalidPatchType, "invalid-patchtype"),
-			},
-		},
-		"ValidCompositeFieldPathPatch": {
-			reason: "Should correctly apply a CompositeFieldPathPatch with valid settings",
-			args: args{
-				patch: Patch{
+				patch: &Patch{
 					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-					ToFieldPath:   pointer.StringPtr("objectMeta.labels"),
+					FromFieldPath: ptr.To("spec.forProvider.foo"),
 				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{Name: "cd"},
-				},
-			},
-			want: want{
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-				},
-				err: nil,
 			},
 		},
-		"MissingOptionalFieldPath": {
-			reason: "A FromFieldPath patch should be a no-op when an optional fromFieldPath doesn't exist",
+		"FromCompositeFieldPathWithInvalidTransforms": {
+			reason: "FromCompositeFieldPath with invalid transforms should return error",
 			args: args{
-				patch: Patch{
+				patch: &Patch{
 					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-					ToFieldPath:   pointer.StringPtr("objectMeta.labels"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
+					FromFieldPath: ptr.To("spec.forProvider.foo"),
+					Transforms: []Transform{
+						{
+							Type: TransformTypeMath,
+							Math: nil,
+						},
 					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{Name: "cd"},
 				},
 			},
 			want: want{
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-					},
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "transforms[0].math",
 				},
-				err: nil,
 			},
 		},
-		"MissingRequiredFieldPath": {
-			reason: "A FromFieldPath patch should return an error when a required fromFieldPath doesn't exist",
+		"InvalidFromCompositeFieldPathMissingFromFieldPath": {
+			reason: "Invalid FromCompositeFieldPath missing FromFieldPath should return error",
 			args: args{
-				patch: Patch{
+				patch: &Patch{
 					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("wat"),
-					Policy: &PatchPolicy{
-						FromFieldPath: func() *FromFieldPathPolicy {
-							s := FromFieldPathPolicyRequired
-							return &s
-						}(),
-					},
-					ToFieldPath: pointer.StringPtr("wat"),
-				},
-				cp: &fake.Composite{
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{Name: "cd"},
+					FromFieldPath: nil,
 				},
 			},
 			want: want{
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-					},
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "fromFieldPath",
 				},
-				err: errNotFound("wat"),
 			},
 		},
-		"MergeOptionsKeepMapValues": {
-			reason: "Setting mergeOptions.keepMapValues = true adds new map values to existing ones",
+		"InvalidFromCompositeFieldPathMissingToFieldPath": {
+			reason: "Invalid ToCompositeFieldPath missing ToFieldPath should return error",
 			args: args{
-				patch: Patch{
-					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-					Policy: &PatchPolicy{
-						MergeOptions: &xpv1.MergeOptions{
-							KeepMapValues: pointer.BoolPtr(true),
-						},
-					},
-					ToFieldPath: pointer.StringPtr("objectMeta.labels"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"labelone": "foo",
-							"labeltwo": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"labelthree": "baz",
-						},
-					},
+				patch: &Patch{
+					Type:        PatchTypeToCompositeFieldPath,
+					ToFieldPath: nil,
 				},
 			},
 			want: want{
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"labelone":   "foo",
-							"labeltwo":   "bar",
-							"labelthree": "baz",
-						},
-					},
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "fromFieldPath",
 				},
-				err: nil,
 			},
 		},
-		"FilterExcludeCompositeFieldPathPatch": {
-			reason: "Should not apply the patch as the PatchType is not present in filter.",
+		"InvalidPatchSetMissingPatchSetName": {
+			reason: "Invalid PatchSet missing PatchSetName should return error",
 			args: args{
-				patch: Patch{
-					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-					ToFieldPath:   pointer.StringPtr("objectMeta.labels"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{Name: "cd"},
-				},
-				only: []PatchType{PatchTypePatchSet},
-			},
-			want: want{
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-					},
-				},
-				err: nil,
-			},
-		},
-		"FilterIncludeCompositeFieldPathPatch": {
-			reason: "Should apply the patch as the PatchType is present in filter.",
-			args: args{
-				patch: Patch{
-					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-					ToFieldPath:   pointer.StringPtr("objectMeta.labels"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{Name: "cd"},
-				},
-				only: []PatchType{PatchTypeFromCompositeFieldPath},
-			},
-			want: want{
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: nil,
-			},
-		},
-		"DefaultToFieldCompositeFieldPathPatch": {
-			reason: "Should correctly default the ToFieldPath value if not specified.",
-			args: args{
-				patch: Patch{
-					Type:          PatchTypeFromCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-					},
+				patch: &Patch{
+					Type: PatchTypePatchSet,
 				},
 			},
 			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "patchSetName",
 				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: nil,
 			},
 		},
-		"ValidToCompositeFieldPathPatch": {
-			reason: "Should correctly apply a ToCompositeFieldPath patch with valid settings",
+		"InvalidCombineMissingCombine": {
+			reason: "Invalid Combine missing Combine should return error",
 			args: args{
-				patch: Patch{
-					Type:          PatchTypeToCompositeFieldPath,
-					FromFieldPath: pointer.StringPtr("objectMeta.labels"),
-					ToFieldPath:   pointer.StringPtr("objectMeta.labels"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
+				patch: &Patch{
+					Type: PatchTypeCombineToComposite,
 				},
 			},
 			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "combine",
 				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: nil,
 			},
 		},
-		"MissingCombineFromCompositeConfig": {
-			reason: "Should return an error if Combine config is not passed",
+		"InvalidCombineMissingToFieldPath": {
+			reason: "Invalid Combine missing ToFieldPath should return error",
 			args: args{
-				patch: Patch{
-					Type:        PatchTypeCombineFromComposite,
-					ToFieldPath: pointer.StringPtr("objectMeta.labels.destination"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-				},
-			},
-			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: errors.Errorf(errFmtRequiredField, "Combine", PatchTypeCombineFromComposite),
-			},
-		},
-		"MissingCombineStrategyFromCompositeConfig": {
-			reason: "Should return an error if Combine strategy config is not passed",
-			args: args{
-				patch: Patch{
-					Type: PatchTypeCombineFromComposite,
-					Combine: &Combine{
-						Variables: []CombineVariable{
-							{FromFieldPath: "objectMeta.labels.source1"},
-							{FromFieldPath: "objectMeta.labels.source2"},
-						},
-						Strategy: CombineStrategyString,
-					},
-					ToFieldPath: pointer.StringPtr("objectMeta.labels.destination"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-				},
-			},
-			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: errors.Errorf(errFmtCombineConfigMissing, CombineStrategyString),
-			},
-		},
-		"MissingCombineVariablesFromCompositeConfig": {
-			reason: "Should return an error if no variables have been passed",
-			args: args{
-				patch: Patch{
-					Type: PatchTypeCombineFromComposite,
-					Combine: &Combine{
-						Variables: []CombineVariable{},
-						Strategy:  CombineStrategyString,
-						String:    &StringCombine{Format: "%s-%s"},
-					},
-					ToFieldPath: pointer.StringPtr("objectMeta.labels.destination"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-				},
-			},
-			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: errors.New(errCombineRequiresVariables),
-			},
-		},
-		"NoOpOptionalInputFieldFromCompositeConfig": {
-			// Note: OptionalFieldPathNotFound is tested below, but we want to
-			// test that we abort the patch if _any_ of our source fields are
-			// not available.
-			reason: "Should return no error and not apply patch if an optional variable is missing",
-			args: args{
-				patch: Patch{
-					Type: PatchTypeCombineFromComposite,
-					Combine: &Combine{
-						Variables: []CombineVariable{
-							{FromFieldPath: "objectMeta.labels.source1"},
-							{FromFieldPath: "objectMeta.labels.source2"},
-							{FromFieldPath: "objectMeta.labels.source3"},
-						},
-						Strategy: CombineStrategyString,
-						String:   &StringCombine{Format: "%s-%s"},
-					},
-					ToFieldPath: pointer.StringPtr("objectMeta.labels.destination"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source3": "baz",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-				},
-			},
-			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source3": "baz",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						}},
-				},
-				err: nil,
-			},
-		},
-		"ValidCombineFromComposite": {
-			reason: "Should correctly apply a CombineFromComposite patch with valid settings",
-			args: args{
-				patch: Patch{
-					Type: PatchTypeCombineFromComposite,
-					Combine: &Combine{
-						Variables: []CombineVariable{
-							{FromFieldPath: "objectMeta.labels.source1"},
-							{FromFieldPath: "objectMeta.labels.source2"},
-						},
-						Strategy: CombineStrategyString,
-						String:   &StringCombine{Format: "%s-%s"},
-					},
-					ToFieldPath: pointer.StringPtr("objectMeta.labels.destination"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test": "blah",
-						},
-					},
-				},
-			},
-			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"Test":        "blah",
-							"destination": "foo-bar",
-						}},
-				},
-				err: nil,
-			},
-		},
-		"ValidCombineToComposite": {
-			reason: "Should correctly apply a CombineToComposite patch with valid settings",
-			args: args{
-				patch: Patch{
+				patch: &Patch{
 					Type: PatchTypeCombineToComposite,
 					Combine: &Combine{
 						Variables: []CombineVariable{
-							{FromFieldPath: "objectMeta.labels.source1"},
-							{FromFieldPath: "objectMeta.labels.source2"},
-						},
-						Strategy: CombineStrategyString,
-						String:   &StringCombine{Format: "%s-%s"},
-					},
-					ToFieldPath: pointer.StringPtr("objectMeta.labels.destination"),
-				},
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test": "blah",
+							{
+								FromFieldPath: "spec.forProvider.foo",
+							},
 						},
 					},
-					ConnectionDetailsLastPublishedTimer: lpt,
-				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						},
-					},
+					ToFieldPath: nil,
 				},
 			},
 			want: want{
-				cp: &fake.Composite{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cp",
-						Labels: map[string]string{
-							"Test":        "blah",
-							"destination": "foo-bar",
-						},
-					},
-					ConnectionDetailsLastPublishedTimer: lpt,
+				err: &field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "toFieldPath",
 				},
-				cd: &fake.Composed{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cd",
-						Labels: map[string]string{
-							"source1": "foo",
-							"source2": "bar",
-						}},
-				},
-				err: nil,
 			},
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			ncp := tc.args.cp.DeepCopyObject()
-			err := tc.args.patch.Apply(ncp, tc.args.cd, tc.args.only...)
-
-			if tc.want.cp != nil {
-				if diff := cmp.Diff(tc.want.cp, ncp); diff != "" {
-					t.Errorf("\n%s\nApply(cp): -want, +got:\n%s", tc.reason, diff)
-				}
-			}
-			if tc.want.cd != nil {
-				if diff := cmp.Diff(tc.want.cd, tc.args.cd); diff != "" {
-					t.Errorf("\n%s\nApply(cd): -want, +got:\n%s", tc.reason, diff)
-				}
-			}
-			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
-				t.Errorf("\n%s\nApply(err): -want, +got:\n%s", tc.reason, diff)
-			}
-		})
-	}
-}
-
-func TestOptionalFieldPathNotFound(t *testing.T) {
-	errBoom := errors.New("boom")
-	errNotFound := func() error {
-		p := &fieldpath.Paved{}
-		_, err := p.GetValue("boom")
-		return err
-	}
-	required := FromFieldPathPolicyRequired
-	optional := FromFieldPathPolicyOptional
-	type args struct {
-		err error
-		p   *PatchPolicy
-	}
-
-	cases := map[string]struct {
-		reason string
-		args
-		want bool
-	}{
-		"NotAnError": {
-			reason: "Should perform patch if no error finding field.",
-			args:   args{},
-			want:   false,
-		},
-		"NotFieldNotFoundError": {
-			reason: "Should return error if something other than field not found.",
-			args: args{
-				err: errBoom,
-			},
-			want: false,
-		},
-		"DefaultOptionalNoPolicy": {
-			reason: "Should return no-op if field not found and no patch policy specified.",
-			args: args{
-				err: errNotFound(),
-			},
-			want: true,
-		},
-		"DefaultOptionalNoPathPolicy": {
-			reason: "Should return no-op if field not found and empty patch policy specified.",
-			args: args{
-				p:   &PatchPolicy{},
-				err: errNotFound(),
-			},
-			want: true,
-		},
-		"OptionalNotFound": {
-			reason: "Should return no-op if field not found and optional patch policy explicitly specified.",
-			args: args{
-				p: &PatchPolicy{
-					FromFieldPath: &optional,
-				},
-				err: errNotFound(),
-			},
-			want: true,
-		},
-		"RequiredNotFound": {
-			reason: "Should return error if field not found and required patch policy explicitly specified.",
-			args: args{
-				p: &PatchPolicy{
-					FromFieldPath: &required,
-				},
-				err: errNotFound(),
-			},
-			want: false,
-		},
-	}
-
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			got := IsOptionalFieldPathNotFound(tc.args.err, tc.args.p)
-			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("IsOptionalFieldPathNotFound(...): -want, +got:\n%s", diff)
-			}
-		})
-	}
-}
-
-func TestComposedTemplates(t *testing.T) {
-	type args struct {
-		cs CompositionSpec
-	}
-
-	type want struct {
-		ct  []ComposedTemplate
-		err error
-	}
-
-	cases := map[string]struct {
-		reason string
-		args
-		want
-	}{
-		"NoCompositionPatchSets": {
-			reason: "Patches defined on a composite resource should be applied correctly if no PatchSets are defined on the composition",
-			args: args{
-				cs: CompositionSpec{
-					Resources: []ComposedTemplate{
-						{
-							Patches: []Patch{
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("metadata.name"),
-								},
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("metadata.namespace"),
-								},
-							},
-						},
-					},
-				},
-			},
-			want: want{
-				ct: []ComposedTemplate{
-					{
-						Patches: []Patch{
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.name"),
-							},
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.namespace"),
-							},
-						},
-					},
-				},
-			},
-		},
-		"UndefinedPatchSet": {
-			reason: "Should return error and not modify the patches field when referring to an undefined PatchSet",
-			args: args{
-				cs: CompositionSpec{
-					Resources: []ComposedTemplate{{
-						Patches: []Patch{
-							{
-								Type:         PatchTypePatchSet,
-								PatchSetName: pointer.StringPtr("patch-set-1"),
-							},
-						},
-					}},
-				},
-			},
-			want: want{
-				err: errors.Errorf(errFmtUndefinedPatchSet, "patch-set-1"),
-			},
-		},
-		"DefinedPatchSets": {
-			reason: "Should de-reference PatchSets defined on the Composition when referenced in a composed resource",
-			args: args{
-				cs: CompositionSpec{
-					// PatchSets, existing patches and references
-					// should output in the correct order.
-					PatchSets: []PatchSet{
-						{
-							Name: "patch-set-1",
-							Patches: []Patch{
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("metadata.namespace"),
-								},
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("spec.parameters.test"),
-								},
-							},
-						},
-						{
-							Name: "patch-set-2",
-							Patches: []Patch{
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("metadata.annotations.patch-test-1"),
-								},
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("metadata.annotations.patch-test-2"),
-									Transforms: []Transform{{
-										Type: TransformTypeMap,
-										Map: &MapTransform{
-											Pairs: map[string]string{
-												"k-1": "v-1",
-												"k-2": "v-2",
-											},
-										},
-									}},
-								},
-							},
-						},
-					},
-					Resources: []ComposedTemplate{
-						{
-							Patches: []Patch{
-								{
-									Type:         PatchTypePatchSet,
-									PatchSetName: pointer.StringPtr("patch-set-2"),
-								},
-								{
-									Type:          PatchTypeFromCompositeFieldPath,
-									FromFieldPath: pointer.StringPtr("metadata.name"),
-								},
-								{
-									Type:         PatchTypePatchSet,
-									PatchSetName: pointer.StringPtr("patch-set-1"),
-								},
-							},
-						},
-						{
-							Patches: []Patch{
-								{
-									Type:         PatchTypePatchSet,
-									PatchSetName: pointer.StringPtr("patch-set-1"),
-								},
-							},
-						},
-					},
-				},
-			},
-			want: want{
-				err: nil,
-				ct: []ComposedTemplate{
-					{
-						Patches: []Patch{
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.annotations.patch-test-1"),
-							},
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.annotations.patch-test-2"),
-								Transforms: []Transform{{
-									Type: TransformTypeMap,
-									Map: &MapTransform{
-										Pairs: map[string]string{
-											"k-1": "v-1",
-											"k-2": "v-2",
-										},
-									},
-								}},
-							},
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.name"),
-							},
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.namespace"),
-							},
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("spec.parameters.test"),
-							},
-						},
-					},
-					{
-						Patches: []Patch{
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("metadata.namespace"),
-							},
-							{
-								Type:          PatchTypeFromCompositeFieldPath,
-								FromFieldPath: pointer.StringPtr("spec.parameters.test"),
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			got, err := tc.args.cs.ComposedTemplates()
-
-			if diff := cmp.Diff(tc.want.ct, got); diff != "" {
-				t.Errorf("\n%s\nrs.ComposedTemplates(...): -want, +got:\n%s", tc.reason, diff)
-			}
-			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
-				t.Errorf("\n%s\nrs.ComposedTemplates(...)): -want, +got:\n%s", tc.reason, diff)
+			err := tc.args.patch.Validate()
+			if diff := cmp.Diff(tc.want.err, err, cmpopts.IgnoreFields(field.Error{}, "Detail", "BadValue")); diff != "" {
+				t.Errorf("%s\nValidate(...): -want, +got:\n%s", tc.reason, diff)
 			}
 		})
 	}

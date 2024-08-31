@@ -18,6 +18,7 @@ package composition
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,97 +27,118 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
+
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
-	"github.com/crossplane/crossplane/apis/apiextensions/v1alpha1"
 )
 
 func TestReconcile(t *testing.T) {
 	errBoom := errors.New("boom")
+	testLog := logging.NewLogrLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.Discard)).WithName("testlog"))
 	ctrl := true
 
-	comp := &v1.Composition{
+	compDev := &v1.Composition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cool-composition",
 			UID:  types.UID("no-you-uid"),
+			Labels: map[string]string{
+				"channel": "dev",
+			},
+		},
+	}
+
+	compStaging := &v1.Composition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cool-composition",
+			UID:  types.UID("no-you-uid"),
+			Labels: map[string]string{
+				"channel": "staging",
+			},
+		},
+	}
+
+	compDevWithAnn := &v1.Composition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cool-composition",
+			UID:  types.UID("no-you-uid"),
+			Labels: map[string]string{
+				"channel": "dev",
+			},
+			Annotations: map[string]string{
+				"myannotation": "coolannotation",
+			},
 		},
 	}
 
 	// Not owned by the above composition.
-	rev1 := &v1alpha1.CompositionRevision{
+	rev1 := &v1.CompositionRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: comp.GetName() + "-1",
-		},
-		Spec: v1alpha1.CompositionRevisionSpec{Revision: 1},
-	}
-
-	// Owned by the above composition, but with an 'older' hash. The status
-	// indicates it is the current version, and thus should be updated.
-	rev2 := &v1alpha1.CompositionRevision{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: comp.GetName() + "-2",
+			Name: compDev.GetName() + "-1",
 			OwnerReferences: []metav1.OwnerReference{{
-				UID:        comp.GetUID(),
-				Controller: &ctrl,
+				UID:                "some-other-uid",
+				Controller:         &ctrl,
+				BlockOwnerDeletion: &ctrl,
 			}},
 			Labels: map[string]string{
-				v1alpha1.LabelCompositionSpecHash: "some-older-hash",
+				v1.LabelCompositionName: compDev.Name,
 			},
 		},
-		Spec: v1alpha1.CompositionRevisionSpec{Revision: 2},
-		Status: v1alpha1.CompositionRevisionStatus{
-			ConditionedStatus: xpv1.ConditionedStatus{
-				Conditions: []xpv1.Condition{v1alpha1.CompositionSpecMatches()},
-			},
-		},
+		Spec: v1.CompositionRevisionSpec{Revision: 1},
 	}
 
-	// Owned by the above composition, with a current hash. The status
-	// indicates it is not the current revision, and thus should be updated.
-	rev3 := &v1alpha1.CompositionRevision{
+	// Owned by the above composition, but with an 'older' hash.
+	rev2 := &v1.CompositionRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: comp.GetName() + "-3",
+			Name: compDev.GetName() + "-2",
 			OwnerReferences: []metav1.OwnerReference{{
-				UID:        comp.GetUID(),
-				Controller: &ctrl,
+				UID:                compDev.GetUID(),
+				Controller:         &ctrl,
+				BlockOwnerDeletion: &ctrl,
 			}},
 			Labels: map[string]string{
-				v1alpha1.LabelCompositionSpecHash: comp.Spec.Hash(),
+				v1.LabelCompositionHash: "some-older-hash",
+				v1.LabelCompositionName: compDev.Name,
 			},
 		},
-		Spec: v1alpha1.CompositionRevisionSpec{Revision: 3},
-		Status: v1alpha1.CompositionRevisionStatus{
-			ConditionedStatus: xpv1.ConditionedStatus{
-				Conditions: []xpv1.Condition{v1alpha1.CompositionSpecDiffers()},
-			},
-		},
+		Spec: v1.CompositionRevisionSpec{Revision: 2},
 	}
 
-	// Owned by the above composition, with a current hash. The status
+	// Owned by the above composition, with a current hash. The revision number
 	// indicates it is the current revision, and thus should not be updated.
-	rev4 := &v1alpha1.CompositionRevision{
+	rev3 := &v1.CompositionRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: comp.GetName() + "-4",
+			Name: compDev.GetName() + "-3",
 			OwnerReferences: []metav1.OwnerReference{{
-				UID:        comp.GetUID(),
-				Controller: &ctrl,
+				UID:                compDev.GetUID(),
+				Controller:         &ctrl,
+				BlockOwnerDeletion: &ctrl,
 			}},
 			Labels: map[string]string{
-				v1alpha1.LabelCompositionSpecHash: comp.Spec.Hash(),
+				v1.LabelCompositionHash: compDev.Hash()[:63],
+				v1.LabelCompositionName: compDev.Name,
+				"channel":               "dev",
 			},
 		},
-		Spec: v1alpha1.CompositionRevisionSpec{Revision: 3},
-		Status: v1alpha1.CompositionRevisionStatus{
-			ConditionedStatus: xpv1.ConditionedStatus{
-				Conditions: []xpv1.Condition{v1alpha1.CompositionSpecMatches()},
+		Spec: v1.CompositionRevisionSpec{Revision: 3},
+	}
+
+	// Should be owned by the above composition, but ownership was stripped out.
+	rev4 := &v1.CompositionRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: compDev.GetName() + "-4",
+			Labels: map[string]string{
+				v1.LabelCompositionHash: "some-other-hash",
+				v1.LabelCompositionName: compDev.Name,
 			},
 		},
+		Spec: v1.CompositionRevisionSpec{Revision: 2},
 	}
 
 	type args struct {
@@ -192,24 +214,20 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		"SuccessfulNoOp": {
-			reason: "We should not create a new CompositionRevision if one exists that matches the Composition's spec hash.",
+			reason: "We should not create a new CompositionRevision if one exists that matches the Composition's hash.",
 			args: args{
 				mgr: &fake.Manager{
 					Client: &test.MockClient{
 						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
-							*obj.(*v1.Composition) = *comp
+							*obj.(*v1.Composition) = *compDev
 							return nil
 						}),
 						MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-							*obj.(*v1alpha1.CompositionRevisionList) = v1alpha1.CompositionRevisionList{
-								Items: []v1alpha1.CompositionRevision{
-									// Not controlled by the above composition.
-									*rev1,
-
+							*obj.(*v1.CompositionRevisionList) = v1.CompositionRevisionList{
+								Items: []v1.CompositionRevision{
 									// Controlled by the above composition with a current hash.
 									// This indicates we don't need to create a new revision.
-									// It does not need its status updated.
-									*rev4,
+									*rev3,
 								},
 							}
 							return nil
@@ -222,28 +240,33 @@ func TestReconcile(t *testing.T) {
 				err: nil,
 			},
 		},
-		"UpdateRevisionStatusError": {
-			reason: "We should return any error encountered while updating a CompositionRevision's status.",
+		"SuccessfulOwnershipUpdate": {
+			reason: "We should control existing composition revisions if ownership was stripped out.",
 			args: args{
 				mgr: &fake.Manager{
 					Client: &test.MockClient{
 						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
-							*obj.(*v1.Composition) = *comp
+							*obj.(*v1.Composition) = *compDev
 							return nil
 						}),
-						MockStatusUpdate: test.NewMockStatusUpdateFn(errBoom),
-						MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-							*obj.(*v1alpha1.CompositionRevisionList) = v1alpha1.CompositionRevisionList{
-								Items: []v1alpha1.CompositionRevision{
-									// Not controlled by the above composition.
-									*rev1,
-
-									// Controlled by the above composition with a current hash.
-									// This indicates we don't need to create a new revision.
-									// It does need its status updated to indicate that it it's
-									// the current revision, though.
+						MockList: func(_ context.Context, obj client.ObjectList, opts ...client.ListOption) error {
+							if len(opts) < 1 || opts[0].(client.MatchingLabels)[v1.LabelCompositionName] != compDev.Name {
+								t.Errorf("unexpected list options: %v", opts)
+							}
+							*obj.(*v1.CompositionRevisionList) = v1.CompositionRevisionList{
+								Items: []v1.CompositionRevision{
+									// Controlled by the above composition, but with an older annotation
 									*rev3,
+
+									// Should be controlled by the above composition, but ownership was stripped out.
+									*rev4,
 								},
+							}
+							return nil
+						},
+						MockUpdate: test.NewMockUpdateFn(nil, func(obj client.Object) error {
+							if owners := obj.GetOwnerReferences(); len(owners) < 1 || owners[0].UID != compDev.GetUID() {
+								t.Errorf("unexpected owner reference: %v, ", obj.GetOwnerReferences()[0])
 							}
 							return nil
 						}),
@@ -252,7 +275,44 @@ func TestReconcile(t *testing.T) {
 			},
 			want: want{
 				r:   reconcile.Result{},
-				err: errors.Wrap(errBoom, errUpdateRevStatus),
+				err: nil,
+			},
+		},
+		"AlreadyControlledByAnotherUID": {
+			reason: "We should return an error when a composition revision has matching composition name but another controller ref.",
+			args: args{
+				mgr: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							*obj.(*v1.Composition) = *compDev
+							return nil
+						}),
+						MockList: func(_ context.Context, obj client.ObjectList, opts ...client.ListOption) error {
+							if len(opts) < 1 || opts[0].(client.MatchingLabels)[v1.LabelCompositionName] != compDev.Name {
+								t.Errorf("unexpected list options: %v", opts)
+							}
+							*obj.(*v1.CompositionRevisionList) = v1.CompositionRevisionList{
+								Items: []v1.CompositionRevision{
+									// Controlled by other composition
+									*rev1,
+
+									// Controlled by the above composition, but with an older annotation
+									*rev3,
+								},
+							}
+							return nil
+						},
+						MockUpdate: test.NewMockUpdateFn(nil, func(obj client.Object) error {
+							if owners := obj.GetOwnerReferences(); len(owners) < 1 || owners[0].UID != compDev.GetUID() {
+								t.Errorf("unexpected owner reference: %v, ", obj.GetOwnerReferences()[0])
+							}
+							return nil
+						}),
+					},
+				},
+			},
+			want: want{
+				err: errors.Wrap(errors.Errorf("%s is already controlled by   (UID some-other-uid)", rev1.GetName()), errOwnRev),
 			},
 		},
 		"CreateCompositionRevisionError": {
@@ -276,35 +336,91 @@ func TestReconcile(t *testing.T) {
 				mgr: &fake.Manager{
 					Client: &test.MockClient{
 						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
-							*obj.(*v1.Composition) = *comp
-							return nil
-						}),
-						MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(obj client.Object) error {
-							want := rev2.DeepCopy()
-							want.Status.SetConditions(v1alpha1.CompositionSpecDiffers())
-
-							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
-								t.Errorf("Status().Update(...): -want, +got:\n%s", diff)
-							}
-
+							*obj.(*v1.Composition) = *compDev
 							return nil
 						}),
 						MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-							*obj.(*v1alpha1.CompositionRevisionList) = v1alpha1.CompositionRevisionList{
-								Items: []v1alpha1.CompositionRevision{
-									// Not controlled by the above composition.
-									*rev1,
-
+							*obj.(*v1.CompositionRevisionList) = v1.CompositionRevisionList{
+								Items: []v1.CompositionRevision{
 									// Controlled by the above composition, but with an older hash.
-									// This indicates we need to create a new composition. The status
-									// also needs updating to indicate this is not the currenr revision.
+									// This indicates we need to create a new composition.
 									*rev2,
 								},
 							}
 							return nil
 						}),
 						MockCreate: test.NewMockCreateFn(nil, func(got client.Object) error {
-							want := NewCompositionRevision(comp, rev2.Spec.Revision+1, comp.Spec.Hash())
+							want := NewCompositionRevision(compDev, rev2.Spec.Revision+1)
+
+							if diff := cmp.Diff(want, got); diff != "" {
+								t.Errorf("Create(): -want, +got:\n%s", diff)
+							}
+
+							return nil
+						}),
+					},
+				},
+			},
+			want: want{
+				r:   reconcile.Result{},
+				err: nil,
+			},
+		},
+		"SuccessfulCreationLabelUpdate": {
+			reason: "We should create a new composition revision when we update labels.",
+			args: args{
+				mgr: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							*obj.(*v1.Composition) = *compStaging
+							return nil
+						}),
+						MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
+							*obj.(*v1.CompositionRevisionList) = v1.CompositionRevisionList{
+								Items: []v1.CompositionRevision{
+									// Controlled by the above composition with previous label
+									*rev3,
+								},
+							}
+							return nil
+						}),
+						MockCreate: test.NewMockCreateFn(nil, func(got client.Object) error {
+							want := NewCompositionRevision(compStaging, rev3.Spec.Revision+1)
+
+							if diff := cmp.Diff(want, got); diff != "" {
+								t.Errorf("Create(): -want, +got:\n%s", diff)
+							}
+
+							return nil
+						}),
+					},
+				},
+			},
+			want: want{
+				r:   reconcile.Result{},
+				err: nil,
+			},
+		},
+		"SuccessfulCreationAnnotationUpdate": {
+			reason: "We should create a new composition revision when we update annotations.",
+			args: args{
+				mgr: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							*obj.(*v1.Composition) = *compDevWithAnn
+							return nil
+						}),
+						MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
+							*obj.(*v1.CompositionRevisionList) = v1.CompositionRevisionList{
+								Items: []v1.CompositionRevision{
+									// Controlled by the above composition, but with an older annotation
+									*rev3,
+								},
+							}
+							return nil
+						}),
+						MockCreate: test.NewMockCreateFn(nil, func(got client.Object) error {
+							want := NewCompositionRevision(compDevWithAnn, rev3.Spec.Revision+1)
 
 							if diff := cmp.Diff(want, got); diff != "" {
 								t.Errorf("Create(): -want, +got:\n%s", diff)
@@ -324,7 +440,7 @@ func TestReconcile(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewReconciler(tc.args.mgr, tc.args.opts...)
+			r := NewReconciler(tc.args.mgr, append(tc.args.opts, WithLogger(testLog))...)
 			got, err := r.Reconcile(context.Background(), reconcile.Request{})
 
 			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {

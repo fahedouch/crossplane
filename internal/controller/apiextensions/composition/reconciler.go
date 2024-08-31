@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package composition creates composition revisions.
 package composition
 
 import (
@@ -22,35 +23,36 @@ import (
 	"strings"
 	"time"
 
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/crossplane/crossplane-runtime/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/event"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
-	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured"
 
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
-	"github.com/crossplane/crossplane/apis/apiextensions/v1alpha1"
+	"github.com/crossplane/crossplane/internal/controller/apiextensions/controller"
 )
 
 const (
 	timeout = 2 * time.Minute
 )
 
-// Error strings
+// Error strings.
 const (
 	errGet             = "cannot get Composition"
 	errListRevs        = "cannot list CompositionRevisions"
 	errCreateRev       = "cannot create CompositionRevision"
+	errOwnRev          = "cannot own CompositionRevision"
 	errUpdateRevStatus = "cannot update CompositionRevision status"
+	errUpdateRevSpec   = "cannot update CompositionRevision spec"
 )
 
 // Event reasons.
@@ -71,9 +73,9 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		For(&v1.Composition{}).
-		Owns(&v1alpha1.CompositionRevision{}).
+		Owns(&v1.CompositionRevision{}).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
+		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
 }
 
 // ReconcilerOption is used to configure the Reconciler.
@@ -95,10 +97,8 @@ func WithRecorder(er event.Recorder) ReconcilerOption {
 
 // NewReconciler returns a Reconciler of Compositions.
 func NewReconciler(mgr manager.Manager, opts ...ReconcilerOption) *Reconciler {
-	kube := unstructured.NewClient(mgr.GetClient())
-
 	r := &Reconciler{
-		client: kube,
+		client: mgr.GetClient(),
 		log:    logging.NewNopLogger(),
 		record: event.NewNopRecorder(),
 	}
@@ -119,9 +119,7 @@ type Reconciler struct {
 }
 
 // Reconcile a Composition.
-func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) { //nolint:gocyclo
-	// NOTE(negz): This method is a little over our complexity goal. Be wary
-	// of making it more complex.
+func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	log := r.log.WithValues("request", req)
 	log.Debug("Reconciling")
 
@@ -139,7 +137,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, nil
 	}
 
-	currentHash := comp.Spec.Hash()
+	currentHash := comp.Hash()
 
 	log = log.WithValues(
 		"uid", comp.GetUID(),
@@ -148,42 +146,63 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		"spec-hash", currentHash,
 	)
 
-	rl := &v1alpha1.CompositionRevisionList{}
-	if err := r.client.List(ctx, rl, client.MatchingLabels{v1alpha1.LabelCompositionName: comp.GetName()}); err != nil {
+	rl := &v1.CompositionRevisionList{}
+	if err := r.client.List(ctx, rl, client.MatchingLabels{v1.LabelCompositionName: comp.GetName()}); err != nil {
 		log.Debug(errListRevs, "error", err)
 		r.record.Event(comp, event.Warning(reasonCreateRev, errors.Wrap(err, errListRevs)))
 		return reconcile.Result{}, errors.Wrap(err, errListRevs)
 	}
 
 	var latestRev, existingRev int64
+
+	if lr := v1.LatestRevision(comp, rl.Items); lr != nil {
+		latestRev = lr.Spec.Revision
+	}
+
 	for i := range rl.Items {
 		rev := &rl.Items[i]
+
 		if !metav1.IsControlledBy(rev, comp) {
+			// We already listed revisions with Composition name label pointing
+			// to this Composition. Let's make sure they are controlled by it.
+			// Note(turkenh): Owner references are stripped out when a resource
+			// is moved from one cluster to another (i.e. backup/restore) since
+			// the UID of the owner is not preserved. We need to make sure to
+			// re-add the owner reference to all revisions of this Composition.
+			if err := meta.AddControllerReference(rev, meta.AsController(meta.TypedReferenceTo(comp, v1.CompositionGroupVersionKind))); err != nil {
+				log.Debug(errOwnRev, "error", err)
+				r.record.Event(comp, event.Warning(reasonUpdateRev, err))
+				return reconcile.Result{}, errors.Wrap(err, errOwnRev)
+			}
+			if err := r.client.Update(ctx, rev); err != nil {
+				log.Debug(errOwnRev, "error", err)
+				r.record.Event(comp, event.Warning(reasonUpdateRev, err))
+				return reconcile.Result{}, errors.Wrap(err, errOwnRev)
+			}
+		}
+
+		// This revision does not match our current Composition.
+		if rev.GetLabels()[v1.LabelCompositionHash] != currentHash[:63] {
 			continue
 		}
 
-		if rev.Spec.Revision > latestRev {
-			latestRev = rev.Spec.Revision
-		}
+		// This revision matches our current Composition. We don't need a new one.
+		existingRev = rev.Spec.Revision
 
-		want := v1alpha1.CompositionSpecDiffers()
-		if rev.GetLabels()[v1alpha1.LabelCompositionSpecHash] == currentHash {
-			existingRev = rev.Spec.Revision
-			want = v1alpha1.CompositionSpecMatches()
-		}
-
-		// No need to update this revision's status; it already has the
-		// appropriate 'Current' condition.
-		if got := rev.Status.GetCondition(v1alpha1.TypeCurrent); got.Status == want.Status {
+		// This revision has the highest revision number - it doesn't need updating.
+		if rev.Spec.Revision == latestRev {
 			continue
 		}
 
-		// Toggle the 'Current' condition of this revision.
-		rev.Status.SetConditions(want)
-		if err := r.client.Status().Update(ctx, rev); err != nil {
-			log.Debug(errUpdateRevStatus, "error", err)
+		// This revision does not have the highest revision number. Update it so that it does.
+		rev.Spec.Revision = latestRev + 1
+		if err := r.client.Update(ctx, rev); err != nil {
+			log.Debug(errUpdateRevSpec, "error", err)
+			if kerrors.IsConflict(err) {
+				return reconcile.Result{Requeue: true}, nil
+			}
 			r.record.Event(comp, event.Warning(reasonUpdateRev, err))
-			return reconcile.Result{}, errors.Wrap(err, errUpdateRevStatus)
+			return reconcile.Result{}, errors.Wrap(err, errUpdateRevSpec)
 		}
 	}
 
@@ -193,7 +212,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, nil
 	}
 
-	if err := r.client.Create(ctx, NewCompositionRevision(comp, latestRev+1, currentHash)); err != nil {
+	if err := r.client.Create(ctx, NewCompositionRevision(comp, latestRev+1)); err != nil {
 		log.Debug(errCreateRev, "error", err)
 		r.record.Event(comp, event.Warning(reasonCreateRev, err))
 		return reconcile.Result{}, errors.Wrap(err, errCreateRev)

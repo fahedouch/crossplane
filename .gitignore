@@ -1,5 +1,6 @@
 /.cache
 /.work
+/.hack
 /_output
 /config/
 /config
@@ -7,6 +8,7 @@ cover.out
 /vendor
 /.vendor-new
 .DS_Store
+Zone.Identifier
 
 # gitlab example
 # exclude files generate by running the example
@@ -18,6 +20,7 @@ gitlab/
 # ignore vscode files (debug config etc...)
 /.vscode
 /.idea
+/.devcontainer
 
 # Crossplane packages
 *.xpkg

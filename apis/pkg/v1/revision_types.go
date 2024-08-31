@@ -36,11 +36,6 @@ const (
 
 // PackageRevisionSpec specifies the desired state of a PackageRevision.
 type PackageRevisionSpec struct {
-	// ControllerConfigRef references a ControllerConfig resource that will be
-	// used to configure the packaged controller Deployment.
-	// +optional
-	ControllerConfigReference *xpv1.Reference `json:"controllerConfigRef,omitempty"`
-
 	// DesiredState of the PackageRevision. Can be either Active or Inactive.
 	DesiredState PackageRevisionDesiredState `json:"desiredState"`
 
@@ -80,21 +75,17 @@ type PackageRevisionSpec struct {
 	// +kubebuilder:default=false
 	SkipDependencyResolution *bool `json:"skipDependencyResolution,omitempty"`
 
-	// WebhookTLSSecretName is the name of the TLS Secret that will be used
-	// by the provider to serve a TLS-enabled webhook server. The certificate
-	// will be injected to webhook configurations as well as CRD conversion
-	// webhook strategy if needed.
-	// If it's not given, provider will not have a certificate mounted to its
-	// filesystem, webhook configurations won't be deployed and if there is a
-	// CRD with webhook conversion strategy, the installation will fail.
+	// Map of string keys and values that can be used to organize and categorize
+	// (scope and select) objects. May match selectors of replication controllers
+	// and services.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 	// +optional
-	WebhookTLSSecretName *string `json:"webhookTLSSecretName,omitempty"`
+	CommonLabels map[string]string `json:"commonLabels,omitempty"`
 }
 
 // PackageRevisionStatus represents the observed state of a PackageRevision.
 type PackageRevisionStatus struct {
 	xpv1.ConditionedStatus `json:",inline"`
-	ControllerRef          xpv1.Reference `json:"controllerRef,omitempty"`
 
 	// References to objects owned by PackageRevision.
 	ObjectRefs []xpv1.TypedReference `json:"objectRefs,omitempty"`
@@ -108,4 +99,11 @@ type PackageRevisionStatus struct {
 	// controller needs these permissions to run. The RBAC manager is
 	// responsible for granting them.
 	PermissionRequests []rbacv1.PolicyRule `json:"permissionRequests,omitempty"`
+}
+
+// A ControllerReference references the controller (e.g. Deployment), if any,
+// that is responsible for reconciling the types a package revision installs.
+type ControllerReference struct {
+	// Name of the controller.
+	Name string `json:"name"`
 }

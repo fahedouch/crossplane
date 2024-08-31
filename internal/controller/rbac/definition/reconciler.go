@@ -14,15 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package definition implements the RBAC manager's support for XRDs.
 package definition
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	rbacv1 "k8s.io/api/rbac/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -34,8 +37,8 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
-	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 
+	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	"github.com/crossplane/crossplane/internal/controller/rbac/controller"
 )
 
@@ -80,7 +83,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		For(&v1.CompositeResourceDefinition{}).
 		Owns(&rbacv1.ClusterRole{}).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
+		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
 }
 
 // ReconcilerOption is used to configure the Reconciler.
@@ -149,7 +152,6 @@ type Reconciler struct {
 // Reconcile a CompositeResourceDefinition by creating a series of opinionated
 // ClusterRoles that may be bound to allow access to the resources it defines.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-
 	log := r.log.WithValues("request", req)
 	log.Debug("Reconciling")
 
@@ -177,26 +179,39 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: false}, nil
 	}
 
+	applied := make([]string, 0)
 	for _, cr := range r.rbac.RenderClusterRoles(d) {
-		cr := cr // Pin range variable so we can take its address.
-		log = log.WithValues("role-name", cr.GetName())
-		err := r.client.Apply(ctx, &cr, resource.MustBeControllableBy(d.GetUID()), resource.AllowUpdateIf(ClusterRolesDiffer))
+		log := log.WithValues("role-name", cr.GetName())
+		origRV := ""
+		err := r.client.Apply(ctx, &cr,
+			resource.MustBeControllableBy(d.GetUID()),
+			resource.AllowUpdateIf(ClusterRolesDiffer),
+			resource.StoreCurrentRV(&origRV),
+		)
 		if resource.IsNotAllowed(err) {
 			log.Debug("Skipped no-op RBAC ClusterRole apply")
 			continue
 		}
 		if err != nil {
-			log.Debug(errApplyRole, "error", err)
+			if kerrors.IsConflict(err) {
+				return reconcile.Result{Requeue: true}, nil
+			}
 			err = errors.Wrap(err, errApplyRole)
 			r.record.Event(d, event.Warning(reasonApplyRoles, err))
 			return reconcile.Result{}, err
 		}
-		log.Debug("Applied RBAC ClusterRole")
+		if cr.GetResourceVersion() != origRV {
+			log.Debug("Applied RBAC ClusterRole")
+			applied = append(applied, cr.GetName())
+		}
+	}
+
+	if len(applied) > 0 {
+		r.record.Event(d, event.Normal(reasonApplyRoles, fmt.Sprintf("Applied RBAC ClusterRoles: %s", resource.StableNAndSomeMore(resource.DefaultFirstN, applied))))
 	}
 
 	// TODO(negz): Add a condition that indicates the RBAC manager is managing
 	// cluster roles for this XRD?
-	r.record.Event(d, event.Normal(reasonApplyRoles, "Applied RBAC ClusterRoles"))
 
 	// There's no need to requeue explicitly - we're watching all XRDs.
 	return reconcile.Result{Requeue: false}, nil
@@ -206,7 +221,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 // ClusterRoles. We consider ClusterRoles to be different if their labels and
 // rules do not match.
 func ClusterRolesDiffer(current, desired runtime.Object) bool {
-	c := current.(*rbacv1.ClusterRole)
-	d := desired.(*rbacv1.ClusterRole)
+	// Calling this with anything but ClusterRoles is a programming error. If it
+	// happens, we probably do want to panic.
+	c := current.(*rbacv1.ClusterRole) //nolint:forcetypeassert // See above.
+	d := desired.(*rbacv1.ClusterRole) //nolint:forcetypeassert // See above.
 	return !cmp.Equal(c.GetLabels(), d.GetLabels()) || !cmp.Equal(c.Rules, d.Rules)
 }

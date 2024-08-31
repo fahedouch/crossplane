@@ -1,28 +1,25 @@
 # Crossplane Governance
 
-This document defines governance policies for the Crossplane project, which is
-developed across two GitHub organizations:
+Crossplane follows two tier governance model. The higher level tier is made up of the
+Crossplane Steering Committee that is responsible for the overall health of the project.
+Maintainers and Organization Members make up the lower tier and they are the main
+contributors to one or more repositories within the overall project.
+
+The governance policies defined here apply to all repositories and work happening within
+the following GitHub organizations:
 
 * https://github.com/crossplane
 * https://github.com/crossplane-contrib
 
-Both GitHub organizations fall under Crossplane's governance policies, but only
-the crossplane organization is constrained by its [charter](CHARTER.md). The
-crossplane-contrib organization exists to provide a neutral home for Crossplane
-extensions. Such extensions fall outside of the project's charter and are not
-required to fall under the project's governance, but may do so by choosing to be
-hosted in the crossplane-contrib organization.
-
 ## Steering Committee
 
-Steering committee members demonstrate a strong commitment to the project with
-views in the interest of the broader Crossplane community. They are the stewards
-of the entire Crossplane organization and are expected to dedicate thoughtful
-and serious effort towards the goal of general success in the ecosystem.
-
-Responsibilities include:
+The Crossplane Steering Committee oversees the overall health of the project. Its made
+up of members that demonstrate a strong commitment to the project with views in the 
+interest of the broader Crossplane community. Their responsibilities include:
 
 * Own the overall charter, vision, and direction of the Crossplane project
+* Define and evolve project governance structures and policies, including
+  project roles and how collaborators become maintainers.
 * Promote broad adoption of the overall project, stewarding the growth and
   health of the entire community
 * Provide guidance for the project maintainers
@@ -36,66 +33,14 @@ Responsibilities include:
 * Actively participate in the regularly scheduled steering committee meetings
 * Regularly attend the recurring community meetings
 
-The current list of steering committee members is published and updated in
-[OWNERS.md](OWNERS.md). All steering committee members will be made owners of
-the Crossplane organizations in GitHub.
+### Composition
 
-### Bootstrapping the steering committee
+The Steering Committee has five (5) seats who will be selected through an election process
+outlined below. Elected committee members will serve 2-year terms. The elections will be
+staggered in order to preserve continuity - i.e. not all seats will be up for election at any
+given year.
 
-The membership of the steering committee will go through an initial
-bootstrapping process to help transition the stewardship and leadership of the
-community over a clearly defined time period and process while ensuring that the
-project remains true to its initial charter.  It is essential that the existing
-vision and strategy continues to guide the project while it continues to grow.
-Therefore, transition in stewardship should not happen abruptly and the founding
-leadership should not be diluted too quickly while the project is still being
-bootstrapped and transitioned.
-
-Therefore, the membership will be bootstrapped over a **2 year period**, from
-the date of acceptance of this governance, as follows:
-
-* Membership will be **limited to 5** total seats
-* **3 seats** are granted to the senior maintainers from the existing Crossplane
-    governance: Bassam Tabbara, Jared Watts, and Nic Cope
-  * **2 year** term
-* **2 seats** to be filled by members of the community selected by the above
-  committee members
-  * **1 year** term
-* When the term for a seat expires, the election process will be used to fill
-    the seat with a replacement member with a **2 year** term
-
-**After** the bootstrapping period of **2 years** has ended, the following
-membership rules will become enacted:
-
-* All terms are valid for **2 years**
-* A single organization may have no more than **2 seats** on the committee
-
-#### Updates During the Bootstrapping Period
-
-We recognize that the bootstrapping period as defined above may not efficiently
-serve the needs of the community as it experiences more growth and contributors,
-especially if that growth is rapid. It is very difficult to forecast how the
-community will grow, but we do believe that the constraints of the given
-bootstrapping period are a sufficient starting point.
-
-We earnestly intend for the bootstrapping period to appropriately serve the
-needs of the community. If the community expands in a manner that outgrows the
-limitations of the steering committee, then we fully intend to make necessary
-changes, such as adding new seats to the committee in an out-of-band process
-from the election schedule described in this governance.
-
-The steering committee will have final say on when and how the committee is
-grown, but we intend for it to be allowed to grow **if and when** the needs of
-the community require it. Any changes to the bootstrapping period will require a
-**super majority** (at least **2/3** of votes) as described in the [updating the
-governance](#updating-the-governance) section.
-
-### Membership Qualifications
-
-This section outlines the desired qualifications to become a member of the
-steering committee. Since members will be selected through the election process
-after the initial bootstrapping, these qualifications are meant to serve more as
-guidance and education than as rigid rules.
+The following are some guidelines for eligibility to the Steering Committee:
 
 * Steering committee members in many cases will already be a maintainer on one
     or more of the repositories within the Crossplane project and be
@@ -110,12 +55,40 @@ guidance and education than as rigid rules.
 * There is **no** minimum time period for contributions to the project by the
   proposed member.
 
+### Initial Steering Committee
+
+The initial steering committee will be nominated by the founders of the project
+in order to ensure continuity of the project charter and vision as additional members come on board.
+Once the terms of the initial committee members expire, new members will be selected through the election
+process outlined below.
+
+Here are the members of the initial steering committee (listed in alphabetical order of first name):
+
+| &nbsp;                                                    | Member                                         | Organization | Email                       | Term Start | Term End   |
+|-----------------------------------------------------------|------------------------------------------------|--------------|-----------------------------|------------|------------|
+| <img width="30px" src="https://github.com/bassam.png">    | [Bassam Tabbara](https://github.com/bassam)    | Upbound      | bassam@upbound.io           | 2024-02-06 | 2026-02-06 |
+| <img width="30px" src="https://github.com/lindblombr.png">| [Brian Lindblom](https://github.com/lindblombr)| Apple        | blindblom@apple.com         | 2024-02-06 | 2025-02-07 |
+| <img width="30px" src="https://github.com/bobh66.png">    | [Bob Haddleton](https://github.com/bobh66)     | Nokia        | bob.haddleton@nokia.com     | 2024-02-06 | 2025-02-07 |
+| <img width="30px" src="https://github.com/jbw976.png">    | [Jared Watts](https://github.com/jbw976)       | Upbound      | jared@upbound.io            | 2024-02-06 | 2026-02-06 |
+| <img width="30px" src="https://github.com/negz.png">      | [Nic Cope](https://github.com/negz)            | Upbound      | negz@upbound.io             | 2024-02-06 | 2026-02-06 |
+
+### Contact Info
+
+The steering committee can be reached at the following locations:
+
+* [`#steering-committee`](https://crossplane.slack.com/archives/C032WMA459S)
+  channel on the [Crossplane Slack](https://slack.crossplane.io/) workspace
+* [`steering@crossplane.io`](mailto:steering@crossplane.io) public email address
+
+Members of the community as well as the broader ecosystem are welcome to contact
+the steering committee for any issues or concerns they can assist with.
+
 ### Election Process
 
 #### Eligibility for Voting
 
 Voting for steering committee members is open to all current steering committee
-members and repository maintainers.
+members and [maintainers](#maintainers).
 
 #### Nomination Criteria
 
@@ -139,9 +112,9 @@ getters will be elected to the open seats.
 
 #### Maximum Representation
 
-As previously stated, when the bootstrapping period ends, the maximum number of
-steering committee members from any organization will be limited to 2 in order
-to encourage diversity.
+When the initial steering committee terms expire, the maximum number of
+steering committee members from any organization (or conglomerate, in the case of 
+companies owning each other), will be limited to 2 in order to encourage diversity.
 
 If the results of an election result in greater than 2 members from a single
 organization, the lowest vote getters from that organization will be removed and
@@ -173,11 +146,11 @@ regardless of the length of that remainder.
 
 The Crossplane project consists of multiple repositories that are published and
 maintained as part of the [crossplane](https://github.com/crossplane) and
-[crossplane-contrib][https://github.com/crossplane-contrib] organizations on
-GitGub. Each repository will be subject to the same overall governance model,
+[crossplane-contrib](https://github.com/crossplane-contrib) organizations on
+GitHub. Each repository will be subject to the same overall governance model,
 but will be allowed to have different teams of people (“maintainers”) with
 permissions and access to the repository.  This increases diversity of
-maintainership in the Crossplane organization, and also increases the velocity
+maintainers in the Crossplane organization, and also increases the velocity
 of code changes.
 
 ### Maintainers
@@ -190,7 +163,7 @@ In general, adding and removing maintainers for a given repo is the
 responsibility of the existing maintainer team for that repo and therefore does
 not require approval from the steering committee. However, in rare cases, the
 steering committee can veto the addition of a new maintainer by following the
-conflict resolution process below.
+[conflict resolution process](#conflict-resolution-and-voting).
 
 Responsibilities include:
 
@@ -253,7 +226,7 @@ Beyond your contributions to the project, consider:
     substantial time (>25%) on Crossplane for the foreseeable future.
 
 If you are meeting these requirements, express interest to the repository’s
-existing maintainers directly.
+existing maintainers directly. 
 
 * We may ask you to do some PRs from our backlog.
 * As you gain experience with the code base and our standards, we will ask you
@@ -289,10 +262,10 @@ below.
 
 ## Organization Members
 
-Beyond the roles of the steering committee and repository maintainers outlined
+Beyond the roles of the steering committee, and maintainers, outlined
 above, contributors from the community can also be added to the Crossplane
 organization as a “member”.  This affiliation only comes with the base
-permissions (read-only) for the organization, so the requirements are fairly
+permissions (triage-only) for the organization, so the requirements are fairly
 low.  Adding new members has the following benefits:
 
 * Encourages a sense of belonging to the community and encourages collaboration

@@ -18,26 +18,32 @@ package binding
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	corev1 "k8s.io/api/core/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
+
 	v1 "github.com/crossplane/crossplane/apis/pkg/v1"
 )
 
 func TestReconcile(t *testing.T) {
 	errBoom := errors.New("boom")
+	testLog := logging.NewLogrLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.Discard)).WithName("testlog"))
 	now := metav1.Now()
 
 	type args struct {
@@ -106,8 +112,8 @@ func TestReconcile(t *testing.T) {
 				r: reconcile.Result{Requeue: false},
 			},
 		},
-		"ListServiceAccountsError": {
-			reason: "We should return an error encountered listing ServiceAccounts.",
+		"ListDeploymentsError": {
+			reason: "We should return an error encountered listing Deployments.",
 			args: args{
 				mgr: &fake.Manager{},
 				opts: []ReconcilerOption{
@@ -124,7 +130,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			want: want{
-				err: errors.Wrap(errBoom, errListSAs),
+				err: errors.Wrap(errBoom, errDeployments),
 			},
 		},
 		"ApplyClusterRoleBindingError": {
@@ -172,8 +178,8 @@ func TestReconcile(t *testing.T) {
 								// owned's UID matches that of the
 								// ProviderRevision because they're both the
 								// empty string.
-								l := o.(*corev1.ServiceAccountList)
-								l.Items = []corev1.ServiceAccount{{
+								l := o.(*appsv1.DeploymentList)
+								l.Items = []appsv1.Deployment{{
 									ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{}}},
 								}}
 								return nil
@@ -189,11 +195,35 @@ func TestReconcile(t *testing.T) {
 				r: reconcile.Result{Requeue: false},
 			},
 		},
+		"PauseReconcile": {
+			reason: "Pause reconciliation if the pause annotation is set.",
+			args: args{
+				mgr: &fake.Manager{},
+				opts: []ReconcilerOption{
+					WithClientApplicator(resource.ClientApplicator{
+						Client: &test.MockClient{
+							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
+								d := o.(*v1.ProviderRevision)
+								d.SetOwnerReferences([]metav1.OwnerReference{{}})
+								d.Spec.DesiredState = v1.PackageRevisionActive
+								d.SetAnnotations(map[string]string{
+									meta.AnnotationKeyReconciliationPaused: "true",
+								})
+								return nil
+							}),
+						},
+					}),
+				},
+			},
+			want: want{
+				r: reconcile.Result{Requeue: false},
+			},
+		},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewReconciler(tc.args.mgr, tc.args.opts...)
+			r := NewReconciler(tc.args.mgr, append(tc.args.opts, WithLogger(testLog))...)
 			got, err := r.Reconcile(context.Background(), reconcile.Request{})
 
 			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {

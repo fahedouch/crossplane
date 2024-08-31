@@ -30,13 +30,13 @@ const (
 )
 
 var (
-	// SchemeGroupVersion is group version used to register these objects
+	// SchemeGroupVersion is group version used to register these objects.
 	SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
 
-	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
+	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: SchemeGroupVersion}
 
-	// AddToScheme adds all registered types to scheme
+	// AddToScheme adds all registered types to scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
 
@@ -56,7 +56,16 @@ var (
 	CompositionGroupVersionKind = SchemeGroupVersion.WithKind(CompositionKind)
 )
 
+// CompositionRevision type metadata.
+var (
+	CompositionRevisionKind             = reflect.TypeOf(CompositionRevision{}).Name()
+	CompositionRevisionGroupKind        = schema.GroupKind{Group: Group, Kind: CompositionRevisionKind}.String()
+	CompositionRevisionKindAPIVersion   = CompositionRevisionKind + "." + SchemeGroupVersion.String()
+	CompositionRevisionGroupVersionKind = SchemeGroupVersion.WithKind(CompositionRevisionKind)
+)
+
 func init() {
 	SchemeBuilder.Register(&CompositeResourceDefinition{}, &CompositeResourceDefinitionList{})
 	SchemeBuilder.Register(&Composition{}, &CompositionList{})
+	SchemeBuilder.Register(&CompositionRevision{}, &CompositionRevisionList{})
 }

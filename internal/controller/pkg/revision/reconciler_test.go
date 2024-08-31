@@ -29,13 +29,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/parser"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
@@ -58,12 +61,14 @@ func (e *ErrBackend) Init(_ context.Context, _ ...parser.BackendOption) (io.Read
 var _ Establisher = &MockEstablisher{}
 
 type MockEstablisher struct {
-	MockEstablish func() ([]xpv1.TypedReference, error)
+	MockEstablish  func() ([]xpv1.TypedReference, error)
+	MockRelinquish func() error
 }
 
 func NewMockEstablisher() *MockEstablisher {
 	return &MockEstablisher{
-		MockEstablish: NewMockEstablishFn(nil, nil),
+		MockEstablish:  NewMockEstablishFn(nil, nil),
+		MockRelinquish: NewMockRelinquishFn(nil),
 	}
 }
 
@@ -71,15 +76,24 @@ func NewMockEstablishFn(refs []xpv1.TypedReference, err error) func() ([]xpv1.Ty
 	return func() ([]xpv1.TypedReference, error) { return refs, err }
 }
 
+func NewMockRelinquishFn(err error) func() error {
+	return func() error { return err }
+}
+
 func (e *MockEstablisher) Establish(context.Context, []runtime.Object, v1.PackageRevision, bool) ([]xpv1.TypedReference, error) {
 	return e.MockEstablish()
 }
 
-var _ Hooks = &MockHook{}
+func (e *MockEstablisher) ReleaseObjects(context.Context, v1.PackageRevision) error {
+	return e.MockRelinquish()
+}
+
+var _ RuntimeHooks = &MockHook{}
 
 type MockHook struct {
-	MockPre  func() error
-	MockPost func() error
+	MockPre        func() error
+	MockPost       func() error
+	MockDeactivate func() error
 }
 
 func NewMockPreFn(err error) func() error {
@@ -90,12 +104,20 @@ func NewMockPostFn(err error) func() error {
 	return func() error { return err }
 }
 
-func (h *MockHook) Pre(context.Context, runtime.Object, v1.PackageRevision) error {
+func NewMockDeactivateFn(err error) func() error {
+	return func() error { return err }
+}
+
+func (h *MockHook) Pre(context.Context, runtime.Object, v1.PackageRevisionWithRuntime, ManifestBuilder) error {
 	return h.MockPre()
 }
 
-func (h *MockHook) Post(context.Context, runtime.Object, v1.PackageRevision) error {
+func (h *MockHook) Post(context.Context, runtime.Object, v1.PackageRevisionWithRuntime, ManifestBuilder) error {
 	return h.MockPost()
+}
+
+func (h *MockHook) Deactivate(context.Context, v1.PackageRevisionWithRuntime, ManifestBuilder) error {
+	return h.MockDeactivate()
 }
 
 var _ parser.Linter = &MockLinter{}
@@ -108,7 +130,7 @@ func NewMockLintFn(err error) func() error {
 	return func() error { return err }
 }
 
-func (m *MockLinter) Lint(*parser.Package) error {
+func (m *MockLinter) Lint(parser.Lintable) error {
 	return m.MockLint()
 }
 
@@ -131,11 +153,11 @@ func NewMockRemoveSelfFn(err error) func() error {
 	return func() error { return err }
 }
 
-func (m *MockDependencyManager) Resolve(ctx context.Context, pkg runtime.Object, pr v1.PackageRevision) (int, int, int, error) {
+func (m *MockDependencyManager) Resolve(_ context.Context, _ runtime.Object, _ v1.PackageRevision) (int, int, int, error) {
 	return m.MockResolve()
 }
 
-func (m *MockDependencyManager) RemoveSelf(ctx context.Context, pr v1.PackageRevision) error {
+func (m *MockDependencyManager) RemoveSelf(_ context.Context, _ v1.PackageRevision) error {
 	return m.MockRemoveSelf()
 }
 
@@ -153,6 +175,7 @@ spec:
 
 func TestReconcile(t *testing.T) {
 	errBoom := errors.New("boom")
+	testLog := logging.NewLogrLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.Discard)).WithName("testlog"))
 	now := metav1.Now()
 	pullPolicy := corev1.PullNever
 	trueVal := true
@@ -251,15 +274,8 @@ func TestReconcile(t *testing.T) {
 								pr.SetDeletionTimestamp(&now)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
-								want := &v1.ConfigurationRevision{}
-								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
-								want.SetDeletionTimestamp(&now)
-								want.SetConditions(v1.Unhealthy())
-
-								if diff := cmp.Diff(want, o); diff != "" {
-									t.Errorf("-want, +got:\n%s", diff)
-								}
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(_ client.Object) error {
+								t.Errorf("StatusUpdate should not be called")
 								return nil
 							}),
 						},
@@ -364,15 +380,8 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
-								want := &v1.ConfigurationRevision{}
-								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
-								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
-
-								if diff := cmp.Diff(want, o); diff != "" {
-									t.Errorf("-want, +got:\n%s", diff)
-								}
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(_ client.Object) error {
+								t.Errorf("StatusUpdate should not be called")
 								return nil
 							}),
 						},
@@ -406,15 +415,8 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
-								want := &v1.ConfigurationRevision{}
-								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
-								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
-
-								if diff := cmp.Diff(want, o); diff != "" {
-									t.Errorf("-want, +got:\n%s", diff)
-								}
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(_ client.Object) error {
+								t.Errorf("StatusUpdate should not be called")
 								return nil
 							}),
 						},
@@ -454,11 +456,12 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetPackagePullPolicy(&pullPolicy)
+								want.SetConditions(v1.Unhealthy().WithMessage("failed to get pre-cached package with pull policy Never"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -494,11 +497,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot initialize parser backend: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -535,11 +538,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot parse package contents: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -577,11 +580,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot parse package contents: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -620,11 +623,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot parse package contents: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -664,11 +667,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot parse package contents: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -708,11 +711,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("linting package contents failed: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -729,7 +732,7 @@ func TestReconcile(t *testing.T) {
 					WithLinter(&MockLinter{MockLint: NewMockLintFn(errBoom)}),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -755,11 +758,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("incompatible Crossplane version: package is not compatible with Crossplane version (v0.11.0): boom"))
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
 
 								if diff := cmp.Diff(want, o); diff != "" {
@@ -786,7 +789,7 @@ func TestReconcile(t *testing.T) {
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -817,11 +820,11 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot install package with multiple meta types"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -862,12 +865,12 @@ func TestReconcile(t *testing.T) {
 								return nil
 							}),
 							MockUpdate: test.NewMockUpdateFn(errBoom),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot update package revision object metadata: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -883,7 +886,7 @@ func TestReconcile(t *testing.T) {
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -892,7 +895,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			want: want{
-				err: errors.Wrap(errBoom, errUpdateAnnotations),
+				err: errors.Wrap(errBoom, errUpdateMeta),
 			},
 		},
 		"ErrResolveDependencies": {
@@ -911,16 +914,16 @@ func TestReconcile(t *testing.T) {
 								pr := o.(*v1.ProviderRevision)
 								pr.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								pr.SetDesiredState(v1.PackageRevisionActive)
-								pr.SetSkipDependencyResolution(pointer.BoolPtr(false))
+								pr.SetSkipDependencyResolution(ptr.To(false))
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ProviderRevision{}
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
-								want.SetSkipDependencyResolution(pointer.BoolPtr(false))
+								want.SetSkipDependencyResolution(ptr.To(false))
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
-								want.SetConditions(v1.UnknownHealth())
+								want.SetConditions(v1.UnknownHealth().WithMessage("cannot resolve package dependencies: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -932,7 +935,7 @@ func TestReconcile(t *testing.T) {
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
-								want.SetSkipDependencyResolution(pointer.BoolPtr(false))
+								want.SetSkipDependencyResolution(ptr.To(false))
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
 								}
@@ -947,7 +950,7 @@ func TestReconcile(t *testing.T) {
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -961,7 +964,7 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		"ErrPreHook": {
-			reason: "We should return an error if pre establishment hook returns an error.",
+			reason: "We should return an error if pre establishment runtimeHook returns an error.",
 			args: args{
 				mgr: &fake.Manager{},
 				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
@@ -970,17 +973,20 @@ func TestReconcile(t *testing.T) {
 					WithClientApplicator(resource.ClientApplicator{
 						Client: &test.MockClient{
 							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
-								pr := o.(*v1.ProviderRevision)
-								pr.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
-								pr.SetDesiredState(v1.PackageRevisionActive)
+								if pr, ok := o.(*v1.ProviderRevision); ok {
+									pr.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
+									pr.SetDesiredState(v1.PackageRevisionActive)
+									pr.SetRuntimeConfigRef(&v1.RuntimeConfigReference{Name: "default"})
+								}
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ProviderRevision{}
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetRuntimeConfigRef(&v1.RuntimeConfigReference{Name: "default"})
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage(errPreHook + ": boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -991,6 +997,7 @@ func TestReconcile(t *testing.T) {
 								want := &v1.ProviderRevision{}
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetRuntimeConfigRef(&v1.RuntimeConfigReference{Name: "default"})
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -1002,14 +1009,14 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(&MockHook{
+					WithRuntimeHooks(&MockHook{
 						MockPre: NewMockPreFn(errBoom),
 					}),
 					WithParser(parser.New(metaScheme, objScheme)),
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1023,7 +1030,7 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		"ErrPostHook": {
-			reason: "We should return an error if post establishment hook returns an error.",
+			reason: "We should return an error if post establishment runtimeHook returns an error.",
 			args: args{
 				mgr: &fake.Manager{},
 				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
@@ -1032,17 +1039,20 @@ func TestReconcile(t *testing.T) {
 					WithClientApplicator(resource.ClientApplicator{
 						Client: &test.MockClient{
 							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
-								pr := o.(*v1.ProviderRevision)
-								pr.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
-								pr.SetDesiredState(v1.PackageRevisionActive)
+								if pr, ok := o.(*v1.ProviderRevision); ok {
+									pr.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
+									pr.SetDesiredState(v1.PackageRevisionActive)
+									pr.SetRuntimeConfigRef(&v1.RuntimeConfigReference{Name: "default"})
+								}
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ProviderRevision{}
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetRuntimeConfigRef(&v1.RuntimeConfigReference{Name: "default"})
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage(errPostHook + ": boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -1053,6 +1063,7 @@ func TestReconcile(t *testing.T) {
 								want := &v1.ProviderRevision{}
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetRuntimeConfigRef(&v1.RuntimeConfigReference{Name: "default"})
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -1064,7 +1075,7 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(&MockHook{
+					WithRuntimeHooks(&MockHook{
 						MockPre:  NewMockPreFn(nil),
 						MockPost: NewMockPostFn(errBoom),
 					}),
@@ -1073,7 +1084,7 @@ func TestReconcile(t *testing.T) {
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1101,7 +1112,7 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
@@ -1130,13 +1141,12 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(NewNopHooks()),
 					WithEstablisher(NewMockEstablisher()),
 					WithParser(parser.New(metaScheme, objScheme)),
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1165,7 +1175,7 @@ func TestReconcile(t *testing.T) {
 								pr.SetIgnoreCrossplaneConstraints(&trueVal)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
@@ -1197,13 +1207,12 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(NewNopHooks()),
 					WithEstablisher(NewMockEstablisher()),
 					WithParser(parser.New(metaScheme, objScheme)),
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1231,12 +1240,12 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionActive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ProviderRevision{}
 								want.SetGroupVersionKind(v1.ProviderRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionActive)
 								want.SetAnnotations(map[string]string{"author": "crossplane"})
-								want.SetConditions(v1.Unhealthy())
+								want.SetConditions(v1.Unhealthy().WithMessage("cannot establish control of object: boom"))
 
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
@@ -1259,7 +1268,6 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(NewNopHooks()),
 					WithEstablisher(&MockEstablisher{
 						MockEstablish: NewMockEstablishFn(nil, errBoom),
 					}),
@@ -1267,7 +1275,7 @@ func TestReconcile(t *testing.T) {
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1280,13 +1288,28 @@ func TestReconcile(t *testing.T) {
 				err: errors.Wrap(errBoom, errEstablishControl),
 			},
 		},
-		"SuccessfulInactiveRevision": {
-			reason: "An inactive revision should establish ownership of all of its resources.",
+		"ErrEstablishInactiveRevision": {
+			reason: "An inactive revision that fails to establish ownership should return an error.",
 			args: args{
 				mgr: &fake.Manager{},
 				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
 				rec: []ReconcilerOption{
-					WithNewPackageRevisionFn(func() v1.PackageRevision { return &v1.ConfigurationRevision{} }),
+					WithNewPackageRevisionFn(func() v1.PackageRevision {
+						return &v1.ConfigurationRevision{
+							Status: v1.PackageRevisionStatus{
+								ObjectRefs: []xpv1.TypedReference{
+									{
+										APIVersion: "apiextensions.k8s.io/v1",
+										Kind:       "CustomResourceDefinition",
+										Name:       "releases.helm.crossplane.io",
+									},
+								},
+							},
+						}
+					}),
+					WithDependencyManager(&MockDependencyManager{
+						MockRemoveSelf: NewMockRemoveSelfFn(nil),
+					}),
 					WithClientApplicator(resource.ClientApplicator{
 						Client: &test.MockClient{
 							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
@@ -1295,7 +1318,62 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionInactive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
+								want := &v1.ConfigurationRevision{
+									Status: v1.PackageRevisionStatus{
+										ObjectRefs: []xpv1.TypedReference{
+											{
+												APIVersion: "apiextensions.k8s.io/v1",
+												Kind:       "CustomResourceDefinition",
+												Name:       "releases.helm.crossplane.io",
+											},
+										},
+									},
+								}
+								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								want.SetDesiredState(v1.PackageRevisionInactive)
+								want.SetConditions(v1.Healthy())
+
+								if diff := cmp.Diff(want, o); diff != "" {
+									t.Errorf("-want, +got:\n%s", diff)
+								}
+								return nil
+							}),
+						},
+					}),
+					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
+						return nil
+					}}),
+					WithEstablisher(&MockEstablisher{
+						MockRelinquish: func() error {
+							return errBoom
+						},
+					}),
+				},
+			},
+			want: want{
+				err: errors.Wrap(errors.Wrap(errBoom, errReleaseObjects), errDeactivateRevision),
+			},
+		},
+		"SuccessfulInactiveRevisionWithoutObjectRefs": {
+			reason: "An inactive revision without ObjectRefs should be deactivated successfully by pulling/parsing the package again.",
+			args: args{
+				mgr: &fake.Manager{},
+				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
+				rec: []ReconcilerOption{
+					WithNewPackageRevisionFn(func() v1.PackageRevision { return &v1.ConfigurationRevision{} }),
+					WithDependencyManager(&MockDependencyManager{
+						MockRemoveSelf: NewMockRemoveSelfFn(nil),
+					}),
+					WithClientApplicator(resource.ClientApplicator{
+						Client: &test.MockClient{
+							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
+								pr := o.(*v1.ConfigurationRevision)
+								pr.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								pr.SetDesiredState(v1.PackageRevisionInactive)
+								return nil
+							}),
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
 								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionInactive)
@@ -1324,13 +1402,12 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(NewNopHooks()),
 					WithEstablisher(NewMockEstablisher()),
 					WithParser(parser.New(metaScheme, objScheme)),
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1343,13 +1420,28 @@ func TestReconcile(t *testing.T) {
 				r: reconcile.Result{Requeue: false},
 			},
 		},
-		"ErrEstablishInactiveRevision": {
-			reason: "An inactive revision that fails to establish ownership should return an error.",
+		"SuccessfulInactiveRevisionWithObjectRefs": {
+			reason: "An inactive revision with ObjectRefs should be deactivated successfully without pulling/parsing the package again.",
 			args: args{
 				mgr: &fake.Manager{},
 				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
 				rec: []ReconcilerOption{
-					WithNewPackageRevisionFn(func() v1.PackageRevision { return &v1.ConfigurationRevision{} }),
+					WithNewPackageRevisionFn(func() v1.PackageRevision {
+						return &v1.ConfigurationRevision{
+							Status: v1.PackageRevisionStatus{
+								ObjectRefs: []xpv1.TypedReference{
+									{
+										APIVersion: "apiextensions.k8s.io/v1",
+										Kind:       "CustomResourceDefinition",
+										Name:       "releases.helm.crossplane.io",
+									},
+								},
+							},
+						}
+					}),
+					WithDependencyManager(&MockDependencyManager{
+						MockRemoveSelf: NewMockRemoveSelfFn(nil),
+					}),
 					WithClientApplicator(resource.ClientApplicator{
 						Client: &test.MockClient{
 							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
@@ -1358,24 +1450,22 @@ func TestReconcile(t *testing.T) {
 								pr.SetDesiredState(v1.PackageRevisionInactive)
 								return nil
 							}),
-							MockStatusUpdate: test.NewMockStatusUpdateFn(nil, func(o client.Object) error {
-								want := &v1.ConfigurationRevision{}
-								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
-								want.SetDesiredState(v1.PackageRevisionInactive)
-								want.SetAnnotations(map[string]string{"author": "crossplane"})
-								want.SetConditions(v1.Unhealthy())
-
-								if diff := cmp.Diff(want, o); diff != "" {
-									t.Errorf("-want, +got:\n%s", diff)
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
+								want := &v1.ConfigurationRevision{
+									Status: v1.PackageRevisionStatus{
+										ObjectRefs: []xpv1.TypedReference{
+											{
+												APIVersion: "apiextensions.k8s.io/v1",
+												Kind:       "CustomResourceDefinition",
+												Name:       "releases.helm.crossplane.io",
+											},
+										},
+									},
 								}
-								return nil
-							}),
-							MockDelete: test.NewMockDeleteFn(nil),
-							MockUpdate: test.NewMockUpdateFn(nil, func(o client.Object) error {
-								want := &v1.ConfigurationRevision{}
 								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
 								want.SetDesiredState(v1.PackageRevisionInactive)
-								want.SetAnnotations(map[string]string{"author": "crossplane"})
+								want.SetConditions(v1.Healthy())
+
 								if diff := cmp.Diff(want, o); diff != "" {
 									t.Errorf("-want, +got:\n%s", diff)
 								}
@@ -1386,15 +1476,56 @@ func TestReconcile(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
 						return nil
 					}}),
-					WithHooks(NewNopHooks()),
-					WithEstablisher(&MockEstablisher{
-						MockEstablish: NewMockEstablishFn(nil, errBoom),
+					WithEstablisher(NewMockEstablisher()),
+				},
+			},
+			want: want{
+				r: reconcile.Result{Requeue: false},
+			},
+		},
+		"PauseReconcile": {
+			reason: "Pause reconciliation if the pause annotation is set.",
+			args: args{
+				mgr: &fake.Manager{},
+				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
+				rec: []ReconcilerOption{
+					WithNewPackageRevisionFn(func() v1.PackageRevision { return &v1.ConfigurationRevision{} }),
+					WithClientApplicator(resource.ClientApplicator{
+						Client: &test.MockClient{
+							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
+								pr := o.(*v1.ConfigurationRevision)
+								pr.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								pr.SetDesiredState(v1.PackageRevisionActive)
+								pr.SetAnnotations(map[string]string{
+									meta.AnnotationKeyReconciliationPaused: "true",
+								})
+								return nil
+							}),
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
+								want := &v1.ConfigurationRevision{}
+								want.SetAnnotations(map[string]string{
+									meta.AnnotationKeyReconciliationPaused: "true",
+								})
+								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetConditions(xpv1.ReconcilePaused().WithMessage(reconcilePausedMsg))
+
+								if diff := cmp.Diff(want, o); diff != "" {
+									t.Errorf("-want, +got:\n%s", diff)
+								}
+								return nil
+							}),
+						},
 					}),
+					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
+						return nil
+					}}),
+					WithEstablisher(NewMockEstablisher()),
 					WithParser(parser.New(metaScheme, objScheme)),
 					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
 					WithCache(&xpkgfake.MockCache{
 						MockHas: xpkgfake.NewMockCacheHasFn(false),
-						MockStore: func(s string, rc io.ReadCloser) error {
+						MockStore: func(_ string, rc io.ReadCloser) error {
 							_, err := io.ReadAll(rc)
 							return err
 						},
@@ -1404,14 +1535,78 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			want: want{
-				err: errors.Wrap(errBoom, errEstablishControl),
+				r: reconcile.Result{Requeue: false},
+			},
+		},
+		"ResumeReconcile": {
+			reason: "An active revision should establish control of all of its resources.",
+			args: args{
+				mgr: &fake.Manager{},
+				req: reconcile.Request{NamespacedName: types.NamespacedName{Name: "test"}},
+				rec: []ReconcilerOption{
+					WithNewPackageRevisionFn(func() v1.PackageRevision { return &v1.ConfigurationRevision{} }),
+					WithClientApplicator(resource.ClientApplicator{
+						Client: &test.MockClient{
+							MockGet: test.NewMockGetFn(nil, func(o client.Object) error {
+								pr := o.(*v1.ConfigurationRevision)
+								pr.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								pr.SetDesiredState(v1.PackageRevisionActive)
+								pr.SetConditions(xpv1.ReconcilePaused())
+								return nil
+							}),
+							MockStatusUpdate: test.NewMockSubResourceUpdateFn(nil, func(o client.Object) error {
+								want := &v1.ConfigurationRevision{}
+								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetAnnotations(map[string]string{"author": "crossplane"})
+								want.SetConditions(v1.Healthy())
+
+								if diff := cmp.Diff(want, o); diff != "" {
+									t.Errorf("-want, +got:\n%s", diff)
+								}
+								return nil
+							}),
+							MockUpdate: test.NewMockUpdateFn(nil, func(o client.Object) error {
+								want := &v1.ConfigurationRevision{}
+								want.SetGroupVersionKind(v1.ConfigurationRevisionGroupVersionKind)
+								want.SetDesiredState(v1.PackageRevisionActive)
+								want.SetAnnotations(map[string]string{"author": "crossplane"})
+								want.CleanConditions()
+								if diff := cmp.Diff(want, o); diff != "" {
+									t.Errorf("-want, +got:\n%s", diff)
+								}
+								return nil
+							}),
+
+							MockDelete: test.NewMockDeleteFn(nil),
+						},
+					}),
+					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error {
+						return nil
+					}}),
+					WithEstablisher(NewMockEstablisher()),
+					WithParser(parser.New(metaScheme, objScheme)),
+					WithParserBackend(parser.NewEchoBackend(string(providerBytes))),
+					WithCache(&xpkgfake.MockCache{
+						MockHas: xpkgfake.NewMockCacheHasFn(false),
+						MockStore: func(_ string, rc io.ReadCloser) error {
+							_, err := io.ReadAll(rc)
+							return err
+						},
+					}),
+					WithLinter(&MockLinter{MockLint: NewMockLintFn(nil)}),
+					WithVersioner(&verfake.MockVersioner{MockInConstraints: verfake.NewMockInConstraintsFn(true, nil)}),
+				},
+			},
+			want: want{
+				r: reconcile.Result{Requeue: false},
 			},
 		},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewReconciler(tc.args.mgr, tc.args.rec...)
+			r := NewReconciler(tc.args.mgr, append(tc.args.rec, WithLogger(testLog))...)
 			got, err := r.Reconcile(context.Background(), reconcile.Request{})
 
 			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {

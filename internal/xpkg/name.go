@@ -42,6 +42,26 @@ const (
 
 	// XpkgMatchPattern is the match pattern for identifying compiled Crossplane packages.
 	XpkgMatchPattern string = "*" + XpkgExtension
+
+	// XpkgExamplesFile is the name of the file in a Crossplane package image
+	// that contains the examples YAML stream.
+	XpkgExamplesFile string = ".up/examples.yaml"
+
+	// AnnotationKey is the key value for xpkg annotations.
+	AnnotationKey string = "io.crossplane.xpkg"
+
+	// PackageAnnotation is the annotation value used for the package.yaml
+	// layer.
+	PackageAnnotation string = "base"
+
+	// ExamplesAnnotation is the annotation value used for the examples.yaml
+	// layer.
+	// TODO(lsviben) Consider changing this to "examples".
+	ExamplesAnnotation string = "upbound"
+
+	// DefaultRegistry is the registry name that will be used when no registry
+	// is provided.
+	DefaultRegistry string = "xpkg.upbound.io"
 )
 
 const (
@@ -65,7 +85,7 @@ func FriendlyID(name, hash string) string {
 }
 
 // ToDNSLabel converts the string to a valid DNS label.
-func ToDNSLabel(s string) string { // nolint:gocyclo
+func ToDNSLabel(s string) string {
 	var cut strings.Builder
 	for i := range s {
 		b := s[i]

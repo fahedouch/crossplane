@@ -37,11 +37,12 @@ func TestRenderClusterRoles(t *testing.T) {
 
 	ctrl := true
 	owner := metav1.OwnerReference{
-		APIVersion: v1.CompositeResourceDefinitionGroupVersionKind.GroupVersion().String(),
-		Kind:       v1.CompositeResourceDefinitionKind,
-		Name:       name,
-		UID:        uid,
-		Controller: &ctrl,
+		APIVersion:         v1.CompositeResourceDefinitionGroupVersionKind.GroupVersion().String(),
+		Kind:               v1.CompositeResourceDefinitionKind,
+		Name:               name,
+		UID:                uid,
+		Controller:         &ctrl,
+		BlockOwnerDeletion: &ctrl,
 	}
 
 	cases := map[string]struct {
@@ -73,6 +74,11 @@ func TestRenderClusterRoles(t *testing.T) {
 							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsEdit,
 						},
+						{
+							APIGroups: []string{group},
+							Resources: []string{pluralXR + suffixFinalizers},
+							Verbs:     verbsUpdate,
+						},
 					},
 				},
 				{
@@ -90,7 +96,7 @@ func TestRenderClusterRoles(t *testing.T) {
 					Rules: []rbacv1.PolicyRule{
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXR},
+							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsEdit,
 						},
 					},
@@ -108,7 +114,7 @@ func TestRenderClusterRoles(t *testing.T) {
 					Rules: []rbacv1.PolicyRule{
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXR},
+							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsView,
 						},
 					},
@@ -125,7 +131,7 @@ func TestRenderClusterRoles(t *testing.T) {
 					Rules: []rbacv1.PolicyRule{
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXR},
+							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsBrowse,
 						},
 					},
@@ -159,8 +165,18 @@ func TestRenderClusterRoles(t *testing.T) {
 						},
 						{
 							APIGroups: []string{group},
+							Resources: []string{pluralXR + suffixFinalizers},
+							Verbs:     verbsUpdate,
+						},
+						{
+							APIGroups: []string{group},
 							Resources: []string{pluralXRC, pluralXRC + suffixStatus},
 							Verbs:     verbsEdit,
+						},
+						{
+							APIGroups: []string{group},
+							Resources: []string{pluralXRC + suffixFinalizers},
+							Verbs:     verbsUpdate,
 						},
 					},
 				},
@@ -179,12 +195,12 @@ func TestRenderClusterRoles(t *testing.T) {
 					Rules: []rbacv1.PolicyRule{
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXR},
+							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsEdit,
 						},
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXRC},
+							Resources: []string{pluralXRC, pluralXRC + suffixStatus},
 							Verbs:     verbsEdit,
 						},
 					},
@@ -202,12 +218,12 @@ func TestRenderClusterRoles(t *testing.T) {
 					Rules: []rbacv1.PolicyRule{
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXR},
+							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsView,
 						},
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXRC},
+							Resources: []string{pluralXRC, pluralXRC + suffixStatus},
 							Verbs:     verbsView,
 						},
 					},
@@ -225,7 +241,7 @@ func TestRenderClusterRoles(t *testing.T) {
 					Rules: []rbacv1.PolicyRule{
 						{
 							APIGroups: []string{group},
-							Resources: []string{pluralXR},
+							Resources: []string{pluralXR, pluralXR + suffixStatus},
 							Verbs:     verbsBrowse,
 						},
 					},

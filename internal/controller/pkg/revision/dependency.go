@@ -18,6 +18,8 @@ package revision
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/Masterminds/semver"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -27,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+
 	pkgmetav1 "github.com/crossplane/crossplane/apis/pkg/meta/v1"
 	v1 "github.com/crossplane/crossplane/apis/pkg/v1"
 	"github.com/crossplane/crossplane/apis/pkg/v1beta1"
@@ -39,8 +42,9 @@ const (
 
 	errNotMeta                   = "meta type is not a valid package"
 	errGetOrCreateLock           = "cannot get or create lock"
-	errIncompatibleDependencyFmt = "incompatible dependencies: %+v"
-	errMissingDependenciesFmt    = "missing dependencies: %+v"
+	errInitDAG                   = "cannot initialize dependency graph from the packages in the lock"
+	errFmtIncompatibleDependency = "incompatible dependencies: %s"
+	errFmtMissingDependencies    = "missing dependencies: %+v"
 	errDependencyNotInGraph      = "dependency is not present in graph"
 	errDependencyNotLockPackage  = "dependency in graph is not a lock package"
 )
@@ -68,7 +72,12 @@ func NewPackageDependencyManager(c client.Client, nd dag.NewDAGFn, t v1beta1.Pac
 }
 
 // Resolve resolves package dependencies.
-func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Object, pr v1.PackageRevision) (found, installed, invalid int, err error) { // nolint:gocyclo
+func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Object, pr v1.PackageRevision) (found, installed, invalid int, err error) { //nolint:gocognit // TODO(negz): Can this be refactored for less complexity?
+	// If we are inactive, we don't need to resolve dependencies.
+	if pr.GetDesiredState() == v1.PackageRevisionInactive {
+		return 0, 0, 0, nil
+	}
+
 	pack, ok := xpkg.TryConvertToPkg(pkg, &pkgmetav1.Provider{}, &pkgmetav1.Configuration{})
 	if !ok {
 		return found, installed, invalid, errors.New(errNotMeta)
@@ -78,12 +87,16 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 	sources := make([]v1beta1.Dependency, len(pack.GetDependencies()))
 	for i, dep := range pack.GetDependencies() {
 		pdep := v1beta1.Dependency{}
-		if dep.Configuration != nil {
+		switch {
+		case dep.Configuration != nil:
 			pdep.Package = *dep.Configuration
 			pdep.Type = v1beta1.ConfigurationPackageType
-		} else if dep.Provider != nil {
+		case dep.Provider != nil:
 			pdep.Package = *dep.Provider
 			pdep.Type = v1beta1.ProviderPackageType
+		case dep.Function != nil:
+			pdep.Package = *dep.Function
+			pdep.Type = v1beta1.FunctionPackageType
 		}
 		pdep.Constraints = dep.Version
 		sources[i] = pdep
@@ -95,11 +108,6 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 	lock := &v1beta1.Lock{}
 	err = m.client.Get(ctx, types.NamespacedName{Name: lockName}, lock)
 	if kerrors.IsNotFound(err) {
-		// If lock does not exist and we are inactive then we can return early
-		// because our only operation would be to remove self.
-		if pr.GetDesiredState() == v1.PackageRevisionInactive {
-			return found, installed, invalid, nil
-		}
 		lock.Name = lockName
 		err = m.client.Create(ctx, lock, &client.CreateOptions{})
 	}
@@ -112,23 +120,13 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 		return found, installed, invalid, err
 	}
 
-	lockRef := xpkg.ParsePackageSourceFromReference(prRef)
-	selfIndex := intPointer(-1)
 	d := m.newDag()
-	implied, err := d.Init(v1beta1.ToNodes(lock.Packages...), dag.FindIndex(lockRef, selfIndex))
+	implied, err := d.Init(v1beta1.ToNodes(lock.Packages...))
 	if err != nil {
-		return found, installed, invalid, err
+		return found, installed, invalid, errors.Wrap(err, errInitDAG)
 	}
 
-	// If we are inactive, all we want to do is remove self.
-	if pr.GetDesiredState() == v1.PackageRevisionInactive {
-		if *selfIndex >= 0 {
-			lock.Packages = append(lock.Packages[:*selfIndex], lock.Packages[*selfIndex+1:]...)
-			return found, installed, invalid, m.client.Update(ctx, lock)
-		}
-		return found, installed, invalid, nil
-	}
-
+	lockRef := xpkg.ParsePackageSourceFromReference(prRef)
 	// NOTE(hasheddan): consider adding health of package to lock so that it can
 	// be rolled up to any dependent packages.
 	self := v1beta1.LockPackage{
@@ -139,8 +137,16 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 		Dependencies: sources,
 	}
 
+	prExists := false
+	for _, lp := range lock.Packages {
+		if lp.Name == pr.GetName() {
+			prExists = true
+			break
+		}
+	}
+
 	// If we don't exist in lock then we should add self.
-	if *selfIndex == -1 {
+	if !prExists {
 		lock.Packages = append(lock.Packages, self)
 		if err := m.client.Update(ctx, lock); err != nil {
 			return found, installed, invalid, err
@@ -160,7 +166,7 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 			missing = append(missing, dep.Identifier())
 		}
 		if installed != found {
-			return found, installed, invalid, errors.Errorf(errMissingDependenciesFmt, missing)
+			return found, installed, invalid, errors.Errorf(errFmtMissingDependencies, missing)
 		}
 	}
 
@@ -179,7 +185,7 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 		}
 	}
 	if len(missing) != 0 {
-		return found, installed, invalid, errors.Errorf(errMissingDependenciesFmt, missing)
+		return found, installed, invalid, errors.Errorf(errFmtMissingDependencies, missing)
 	}
 
 	// All of our dependencies and transitive dependencies must exist. Check
@@ -203,26 +209,25 @@ func (m *PackageDependencyManager) Resolve(ctx context.Context, pkg runtime.Obje
 			return found, installed, invalid, err
 		}
 		if !c.Check(v) {
-			invalidDeps = append(invalidDeps, lp.Identifier())
+			s := fmt.Sprintf("existing package %s@%s", lp.Identifier(), lp.Version)
+			if dep.Constraints != "" {
+				s = fmt.Sprintf("%s is incompatible with constraint %s", s, strings.TrimSpace(dep.Constraints))
+			}
+			invalidDeps = append(invalidDeps, s)
 		}
 	}
 	invalid = len(invalidDeps)
 	if invalid > 0 {
-		return found, installed, invalid, errors.Errorf(errIncompatibleDependencyFmt, invalidDeps)
+		return found, installed, invalid, errors.Errorf(errFmtIncompatibleDependency, strings.Join(invalidDeps, "; "))
 	}
 	return found, installed, invalid, nil
 }
 
 // RemoveSelf removes a package from the lock.
 func (m *PackageDependencyManager) RemoveSelf(ctx context.Context, pr v1.PackageRevision) error {
-	prRef, err := name.ParseReference(pr.GetSource(), name.WithDefaultRegistry(""))
-	if err != nil {
-		return err
-	}
-
 	// Get the lock.
 	lock := &v1beta1.Lock{}
-	err = m.client.Get(ctx, types.NamespacedName{Name: lockName}, lock)
+	err := m.client.Get(ctx, types.NamespacedName{Name: lockName}, lock)
 	if kerrors.IsNotFound(err) {
 		// If lock does not exist then we don't need to remove self.
 		return nil
@@ -232,16 +237,11 @@ func (m *PackageDependencyManager) RemoveSelf(ctx context.Context, pr v1.Package
 	}
 
 	// Find self and remove. If we don't exist, its a no-op.
-	lockRef := xpkg.ParsePackageSourceFromReference(prRef)
 	for i, lp := range lock.Packages {
-		if lp.Source == lockRef {
+		if lp.Name == pr.GetName() {
 			lock.Packages = append(lock.Packages[:i], lock.Packages[i+1:]...)
 			return m.client.Update(ctx, lock)
 		}
 	}
 	return nil
-}
-
-func intPointer(i int) *int {
-	return &i
 }

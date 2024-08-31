@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package pkg implements the controllers of the Crossplane Package manager.
 package pkg
 
 import (
@@ -30,13 +31,16 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	for _, setup := range []func(ctrl.Manager, controller.Options) error{
 		manager.SetupConfiguration,
 		manager.SetupProvider,
+		manager.SetupFunction,
 		resolver.Setup,
 		revision.SetupConfigurationRevision,
 		revision.SetupProviderRevision,
+		revision.SetupFunctionRevision,
 	} {
 		if err := setup(mgr, o); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

@@ -30,13 +30,13 @@ const (
 )
 
 var (
-	// SchemeGroupVersion is group version used to register these objects
+	// SchemeGroupVersion is group version used to register these objects.
 	SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
 
-	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
+	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: SchemeGroupVersion}
 
-	// AddToScheme adds all registered types to the scheme
+	// AddToScheme adds all registered types to the scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
 
@@ -48,15 +48,6 @@ var (
 	ControllerConfigGroupVersionKind = SchemeGroupVersion.WithKind(ControllerConfigKind)
 )
 
-// Lock type metadata.
-var (
-	LockKind             = reflect.TypeOf(Lock{}).Name()
-	LockGroupKind        = schema.GroupKind{Group: Group, Kind: LockKind}.String()
-	LockKindAPIVersion   = LockKind + "." + SchemeGroupVersion.String()
-	LockGroupVersionKind = SchemeGroupVersion.WithKind(LockKind)
-)
-
 func init() {
 	SchemeBuilder.Register(&ControllerConfig{}, &ControllerConfigList{})
-	SchemeBuilder.Register(&Lock{}, &LockList{})
 }

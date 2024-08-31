@@ -25,8 +25,10 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/parser"
+
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	pkgmetav1 "github.com/crossplane/crossplane/apis/pkg/meta/v1"
+	pkgmetav1beta1 "github.com/crossplane/crossplane/apis/pkg/meta/v1beta1"
 	"github.com/crossplane/crossplane/internal/version"
 )
 
@@ -35,13 +37,14 @@ const (
 	errNotMeta                           = "meta type is not a package"
 	errNotMetaProvider                   = "package meta type is not Provider"
 	errNotMetaConfiguration              = "package meta type is not Configuration"
+	errNotMetaFunction                   = "package meta type is not Function"
 	errNotCRD                            = "object is not a CRD"
 	errNotXRD                            = "object is not an XRD"
 	errNotMutatingWebhookConfiguration   = "object is not a MutatingWebhookConfiguration"
 	errNotValidatingWebhookConfiguration = "object is not an ValidatingWebhookConfiguration"
 	errNotComposition                    = "object is not a Composition"
 	errBadConstraints                    = "package version constraints are poorly formatted"
-	errCrossplaneIncompatibleFmt         = "package is not compatible with Crossplane version (%s)"
+	errFmtCrossplaneIncompatible         = "package is not compatible with Crossplane version (%s)"
 )
 
 // NewProviderLinter is a convenience function for creating a package linter for
@@ -61,8 +64,14 @@ func NewConfigurationLinter() parser.Linter {
 	return parser.NewPackageLinter(parser.PackageLinterFns(OneMeta), parser.ObjectLinterFns(IsConfiguration, PackageValidSemver), parser.ObjectLinterFns(parser.Or(IsXRD, IsComposition)))
 }
 
+// NewFunctionLinter is a convenience function for creating a package linter for
+// functions.
+func NewFunctionLinter() parser.Linter {
+	return parser.NewPackageLinter(parser.PackageLinterFns(OneMeta), parser.ObjectLinterFns(IsFunction, PackageValidSemver), parser.ObjectLinterFns())
+}
+
 // OneMeta checks that there is only one meta object in the package.
-func OneMeta(pkg *parser.Package) error {
+func OneMeta(pkg parser.Lintable) error {
 	if len(pkg.GetMeta()) != 1 {
 		return errors.New(errNotExactlyOneMeta)
 	}
@@ -87,11 +96,19 @@ func IsConfiguration(o runtime.Object) error {
 	return nil
 }
 
+// IsFunction checks that an object is a Function meta type.
+func IsFunction(o runtime.Object) error {
+	if _, ok := o.(*pkgmetav1beta1.Function); !ok {
+		return errors.New(errNotMetaFunction)
+	}
+	return nil
+}
+
 // PackageCrossplaneCompatible checks that the current Crossplane version is
 // compatible with the package constraints.
 func PackageCrossplaneCompatible(v version.Operations) parser.ObjectLinterFn {
 	return func(o runtime.Object) error {
-		p, ok := TryConvertToPkg(o, &pkgmetav1.Provider{}, &pkgmetav1.Configuration{})
+		p, ok := TryConvertToPkg(o, &pkgmetav1.Provider{}, &pkgmetav1.Configuration{}, &pkgmetav1.Function{})
 		if !ok {
 			return errors.New(errNotMeta)
 		}
@@ -101,10 +118,10 @@ func PackageCrossplaneCompatible(v version.Operations) parser.ObjectLinterFn {
 		}
 		in, err := v.InConstraints(p.GetCrossplaneConstraints().Version)
 		if err != nil {
-			return errors.Wrapf(err, errCrossplaneIncompatibleFmt, v.GetVersionString())
+			return errors.Wrapf(err, errFmtCrossplaneIncompatible, v.GetVersionString())
 		}
 		if !in {
-			return errors.Errorf(errCrossplaneIncompatibleFmt, v.GetVersionString())
+			return errors.Errorf(errFmtCrossplaneIncompatible, v.GetVersionString())
 		}
 		return nil
 	}
@@ -112,7 +129,7 @@ func PackageCrossplaneCompatible(v version.Operations) parser.ObjectLinterFn {
 
 // PackageValidSemver checks that the package uses valid semver ranges.
 func PackageValidSemver(o runtime.Object) error {
-	p, ok := TryConvertToPkg(o, &pkgmetav1.Provider{}, &pkgmetav1.Configuration{})
+	p, ok := TryConvertToPkg(o, &pkgmetav1.Provider{}, &pkgmetav1.Configuration{}, &pkgmetav1.Function{})
 	if !ok {
 		return errors.New(errNotMeta)
 	}

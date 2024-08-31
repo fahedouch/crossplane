@@ -14,69 +14,64 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package main implements Crossplane's crank CLI - aka crossplane CLI.
 package main
 
 import (
-	"fmt"
-
 	"github.com/alecthomas/kong"
-	"github.com/spf13/afero"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
-	"github.com/crossplane/crossplane/internal/version"
+
+	"github.com/crossplane/crossplane/cmd/crank/beta"
+	"github.com/crossplane/crossplane/cmd/crank/render"
+	"github.com/crossplane/crossplane/cmd/crank/version"
+	"github.com/crossplane/crossplane/cmd/crank/xpkg"
 )
 
-var _ = kong.Must(&cli)
+var _ = kong.Must(&cli{})
 
-type versionFlag string
-type verboseFlag bool
+type (
+	verboseFlag bool
+)
 
-// Decode overrides the default string decoder to be a no-op.
-func (v versionFlag) Decode(ctx *kong.DecodeContext) error { return nil } // nolint:unparam
-
-// IsBool indicates that this string flag should be treated as a boolean value.
-func (v versionFlag) IsBool() bool { return true }
-
-// BeforeApply indicates that we want to execute the logic before running any
-// commands.
-func (v versionFlag) BeforeApply(app *kong.Kong) error { // nolint:unparam
-	fmt.Fprintln(app.Stdout, version.New().GetVersionString())
-	app.Exit(0)
-	return nil
-}
-
-func (v verboseFlag) BeforeApply(ctx *kong.Context) error { // nolint:unparam
+func (v verboseFlag) BeforeApply(ctx *kong.Context) error { //nolint:unparam // BeforeApply requires this signature.
 	logger := logging.NewLogrLogger(zap.New(zap.UseDevMode(true)))
 	ctx.BindTo(logger, (*logging.Logger)(nil))
 	return nil
 }
 
-var cli struct {
-	Version versionFlag `short:"v" name:"version" help:"Print version and quit."`
-	Verbose verboseFlag `name:"verbose" help:"Print verbose logging statements."`
+// The top-level crossplane CLI.
+type cli struct {
+	// Subcommands and flags will appear in the CLI help output in the same
+	// order they're specified here. Keep them in alphabetical order.
 
-	Build   buildCmd   `cmd:"" help:"Build Crossplane packages."`
-	Install installCmd `cmd:"" help:"Install Crossplane packages."`
-	Update  updateCmd  `cmd:"" help:"Update Crossplane packages."`
-	Push    pushCmd    `cmd:"" help:"Push Crossplane packages."`
+	// Subcommands.
+	XPKG   xpkg.Cmd   `cmd:"" help:"Manage Crossplane packages."`
+	Render render.Cmd `cmd:"" help:"Render a composite resource (XR)."`
+
+	// The alpha and beta subcommands are intentionally in a separate block. We
+	// want them to appear after all other subcommands.
+	Beta    beta.Cmd    `cmd:"" help:"Beta commands."`
+	Version version.Cmd `cmd:"" help:"Print the client and server version information for the current context."`
+
+	// Flags.
+	Verbose verboseFlag `help:"Print verbose logging statements." name:"verbose"`
 }
 
 func main() {
-	buildChild := &buildChild{
-		fs: afero.NewOsFs(),
-	}
-	pushChild := &pushChild{
-		fs: afero.NewOsFs(),
-	}
 	logger := logging.NewNopLogger()
-	ctx := kong.Parse(&cli,
-		kong.Name("kubectl crossplane"),
+	ctx := kong.Parse(&cli{},
+		kong.Name("crossplane"),
 		kong.Description("A command line tool for interacting with Crossplane."),
 		// Binding a variable to kong context makes it available to all commands
 		// at runtime.
-		kong.Bind(buildChild, pushChild),
 		kong.BindTo(logger, (*logging.Logger)(nil)),
+		kong.ConfigureHelp(kong.HelpOptions{
+			FlagsLast:      true,
+			Compact:        true,
+			WrapUpperBound: 80,
+		}),
 		kong.UsageOnError())
 	err := ctx.Run()
 	ctx.FatalIfErrorf(err)

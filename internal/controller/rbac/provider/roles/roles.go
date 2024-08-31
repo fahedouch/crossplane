@@ -21,10 +21,10 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
+
 	v1 "github.com/crossplane/crossplane/apis/pkg/v1"
 )
 
@@ -38,10 +38,12 @@ const (
 	keyAggregateToAdmin      = "rbac.crossplane.io/aggregate-to-admin"
 	keyAggregateToEdit       = "rbac.crossplane.io/aggregate-to-edit"
 	keyAggregateToView       = "rbac.crossplane.io/aggregate-to-view"
+	keyProviderName          = "rbac.crossplane.io/system"
 
 	valTrue = "true"
 
-	suffixStatus = "/status"
+	suffixStatus     = "/status"
+	suffixFinalizers = "/finalizers"
 
 	pluralEvents     = "events"
 	pluralConfigmaps = "configmaps"
@@ -49,10 +51,12 @@ const (
 	pluralLeases     = "leases"
 )
 
+//nolint:gochecknoglobals // We treat these as constants.
 var (
 	verbsEdit   = []string{rbacv1.VerbAll}
 	verbsView   = []string{"get", "list", "watch"}
 	verbsSystem = []string{"get", "list", "watch", "update", "patch", "create"}
+	verbsUpdate = []string{"update"}
 )
 
 // Extra rules that are granted to all provider pods.
@@ -63,6 +67,8 @@ var (
 // * ConfigMaps for leader election.
 // * Leases for leader election.
 // * Events for debugging.
+//
+//nolint:gochecknoglobals // We treat this as a constant.
 var rulesSystemExtra = []rbacv1.PolicyRule{
 	{
 		APIGroups: []string{"", coordinationv1.GroupName},
@@ -77,23 +83,36 @@ func SystemClusterRoleName(revisionName string) string {
 	return namePrefix + revisionName + nameSuffixSystem
 }
 
+// A Resource is a Kubernetes API resource.
+type Resource struct {
+	// Group is the unversioned API group of this resource.
+	Group string
+
+	// Plural is the plural name of this resource.
+	Plural string
+}
+
 // RenderClusterRoles returns ClusterRoles for the supplied ProviderRevision.
-func RenderClusterRoles(pr *v1.ProviderRevision, crds []extv1.CustomResourceDefinition) []rbacv1.ClusterRole {
-	// Our list of CRDs has no guaranteed order, so we sort them in order to
-	// ensure we don't reorder our RBAC rules on each update.
-	sort.Slice(crds, func(i, j int) bool { return crds[i].GetName() < crds[j].GetName() })
+func RenderClusterRoles(pr *v1.ProviderRevision, rs []Resource) []rbacv1.ClusterRole {
+	// Return early if we have no resources to render roles for.
+	if len(rs) == 0 {
+		return nil
+	}
+
+	// Our list of resources has no guaranteed order, so we sort them in order
+	// to ensure we don't reorder our RBAC rules on each update.
+	sort.Slice(rs, func(i, j int) bool {
+		return rs[i].Plural+rs[i].Group < rs[j].Plural+rs[j].Group
+	})
 
 	groups := make([]string, 0)            // Allows deterministic iteration over groups.
 	resources := make(map[string][]string) // Resources by group.
-	for _, crd := range crds {
-		if _, ok := resources[crd.Spec.Group]; !ok {
-			resources[crd.Spec.Group] = make([]string, 0)
-			groups = append(groups, crd.Spec.Group)
+	for _, r := range rs {
+		if _, ok := resources[r.Group]; !ok {
+			resources[r.Group] = make([]string, 0)
+			groups = append(groups, r.Group)
 		}
-		resources[crd.Spec.Group] = append(resources[crd.Spec.Group],
-			crd.Spec.Names.Plural,
-			crd.Spec.Names.Plural+suffixStatus,
-		)
+		resources[r.Group] = append(resources[r.Group], r.Plural, r.Plural+suffixStatus)
 	}
 
 	rules := []rbacv1.PolicyRule{}
@@ -102,6 +121,16 @@ func RenderClusterRoles(pr *v1.ProviderRevision, crds []extv1.CustomResourceDefi
 			APIGroups: []string{g},
 			Resources: resources[g],
 		})
+	}
+
+	// Provider pods may create Kubernetes secrets containing managed resource connection details.
+	// These secrets are controlled (in the owner reference sense) by the managed resource.
+	// Crossplane needs permission to set finalizers on managed resources in order to create secrets
+	// that block their deletion when the OwnerReferencesPermissionEnforcement admission controller is enabled.
+	ruleFinalizers := rbacv1.PolicyRule{
+		APIGroups: groups,
+		Resources: []string{rbacv1.ResourceAll + suffixFinalizers},
+		Verbs:     verbsUpdate,
 	}
 
 	edit := &rbacv1.ClusterRole{
@@ -136,8 +165,13 @@ func RenderClusterRoles(pr *v1.ProviderRevision, crds []extv1.CustomResourceDefi
 	// The 'system' RBAC role does not aggregate; it is intended to be bound
 	// directly to the service account tha provider runs as.
 	system := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: SystemClusterRoleName(pr.GetName())},
-		Rules:      append(append(withVerbs(rules, verbsSystem), rulesSystemExtra...), pr.Status.PermissionRequests...),
+		ObjectMeta: metav1.ObjectMeta{
+			Name: SystemClusterRoleName(pr.GetName()),
+			Labels: map[string]string{
+				keyProviderName: pr.GetName(),
+			},
+		},
+		Rules: append(append(append(withVerbs(rules, verbsSystem), ruleFinalizers), rulesSystemExtra...), pr.Status.PermissionRequests...),
 	}
 
 	roles := []rbacv1.ClusterRole{*edit, *view, *system}

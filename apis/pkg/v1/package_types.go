@@ -18,6 +18,10 @@ package v1
 
 import corev1 "k8s.io/api/core/v1"
 
+// RevisionActivationPolicy indicates how a package should activate its
+// revisions.
+type RevisionActivationPolicy string
+
 // PackageSpec specifies the desired state of a Package.
 type PackageSpec struct {
 	// Package is the name of the package that is being requested.
@@ -62,6 +66,13 @@ type PackageSpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	SkipDependencyResolution *bool `json:"skipDependencyResolution,omitempty"`
+
+	// Map of string keys and values that can be used to organize and categorize
+	// (scope and select) objects. May match selectors of replication controllers
+	// and services.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
+	// +optional
+	CommonLabels map[string]string `json:"commonLabels,omitempty"`
 }
 
 // PackageStatus represents the observed state of a Package.

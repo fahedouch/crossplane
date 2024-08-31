@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+
 	v1 "github.com/crossplane/crossplane/apis/pkg/v1"
 	"github.com/crossplane/crossplane/internal/xpkg"
 )
@@ -34,7 +35,7 @@ const (
 
 // Revisioner extracts a revision name for a package source.
 type Revisioner interface {
-	Revision(context.Context, v1.Package) (string, error)
+	Revision(ctx context.Context, p v1.Package) (string, error)
 }
 
 // PackageRevisioner extracts a revision name for a package source.

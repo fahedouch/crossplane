@@ -14,6 +14,7 @@ See the License for the specific language governing perimpliedions and
 limitations under the License.
 */
 
+// Package resolver implements the Crossplane Package Lock controller.
 package resolver
 
 import (
@@ -25,6 +26,7 @@ import (
 
 	"github.com/Masterminds/semver"
 	"github.com/google/go-containerregistry/pkg/name"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,12 +59,12 @@ const (
 	errRemoveFinalizer      = "cannot remove lock finalizer"
 	errBuildDAG             = "cannot build DAG"
 	errSortDAG              = "cannot sort DAG"
-	errMissingDependencyFmt = "missing package (%s) is not a dependency"
+	errFmtMissingDependency = "missing package (%s) is not a dependency"
 	errInvalidConstraint    = "version constraint on dependency is invalid"
 	errInvalidDependency    = "dependency package is not valid"
 	errFetchTags            = "cannot fetch dependency package tags"
 	errNoValidVersion       = "cannot find a valid version for package constraints"
-	errNoValidVersionFmt    = "dependency (%s) does not have version in constraints (%s)"
+	errFmtNoValidVersion    = "dependency (%s) does not have version in constraints (%s)"
 	errInvalidPackageType   = "cannot create invalid package dependency type"
 	errCreateDependency     = "cannot create dependency package"
 )
@@ -98,13 +100,21 @@ func WithFetcher(f xpkg.Fetcher) ReconcilerOption {
 	}
 }
 
+// WithDefaultRegistry sets the default registry to use.
+func WithDefaultRegistry(registry string) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.registry = registry
+	}
+}
+
 // Reconciler reconciles packages.
 type Reconciler struct {
-	client  client.Client
-	log     logging.Logger
-	lock    resource.Finalizer
-	newDag  dag.NewDAGFn
-	fetcher xpkg.Fetcher
+	client   client.Client
+	log      logging.Logger
+	lock     resource.Finalizer
+	newDag   dag.NewDAGFn
+	fetcher  xpkg.Fetcher
+	registry string
 }
 
 // Setup adds a controller that reconciles the Lock.
@@ -115,7 +125,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to initialize clientset")
 	}
-	f, err := xpkg.NewK8sFetcher(cs, o.Namespace, o.FetcherOptions...)
+	f, err := xpkg.NewK8sFetcher(cs, append(o.FetcherOptions, xpkg.WithNamespace(o.Namespace), xpkg.WithServiceAccount(o.ServiceAccount))...)
 	if err != nil {
 		return errors.Wrap(err, "cannot build fetcher")
 	}
@@ -123,6 +133,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	r := NewReconciler(mgr,
 		WithLogger(o.Logger.WithValues("controller", name)),
 		WithFetcher(f),
+		WithDefaultRegistry(o.DefaultRegistry),
 	)
 
 	return ctrl.NewControllerManagedBy(mgr).
@@ -131,7 +142,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		Owns(&v1.ConfigurationRevision{}).
 		Owns(&v1.ProviderRevision{}).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
+		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
 }
 
 // NewReconciler creates a new package revision reconciler.
@@ -152,7 +163,7 @@ func NewReconciler(mgr manager.Manager, opts ...ReconcilerOption) *Reconciler {
 }
 
 // Reconcile package revision.
-func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) { // nolint:gocyclo
+func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	log := r.log.WithValues("request", req)
 	log.Debug("Reconciling")
 
@@ -174,6 +185,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	if len(lock.Packages) == 0 {
 		if err := r.lock.RemoveFinalizer(ctx, lock); err != nil {
 			log.Debug(errRemoveFinalizer, "error", err)
+			if kerrors.IsConflict(err) {
+				return reconcile.Result{Requeue: true}, nil
+			}
 			return reconcile.Result{}, errors.Wrap(err, errRemoveFinalizer)
 		}
 		return reconcile.Result{}, nil
@@ -181,6 +195,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 	if err := r.lock.AddFinalizer(ctx, lock); err != nil {
 		log.Debug(errAddFinalizer, "error", err)
+		if kerrors.IsConflict(err) {
+			return reconcile.Result{Requeue: true}, nil
+		}
 		return reconcile.Result{}, errors.Wrap(err, errAddFinalizer)
 	}
 
@@ -215,7 +232,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	// check for missing nodes again.
 	dep, ok := implied[0].(*v1beta1.Dependency)
 	if !ok {
-		log.Debug(errInvalidDependency, "error", errors.Errorf(errMissingDependencyFmt, dep.Identifier()))
+		log.Debug(errInvalidDependency, "error", errors.Errorf(errFmtMissingDependency, dep.Identifier()))
 		return reconcile.Result{Requeue: false}, nil
 	}
 	c, err := semver.NewConstraint(dep.Constraints)
@@ -223,7 +240,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		log.Debug(errInvalidConstraint, "error", err)
 		return reconcile.Result{Requeue: false}, nil
 	}
-	ref, err := name.ParseReference(dep.Package)
+	ref, err := name.ParseReference(dep.Package, name.WithDefaultRegistry(r.registry))
 	if err != nil {
 		log.Debug(errInvalidDependency, "error", err)
 		return reconcile.Result{Requeue: false}, nil
@@ -259,7 +276,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	// NOTE(hasheddan): consider creating event on package revision
 	// dictating constraints.
 	if addVer == "" {
-		log.Debug(errNoValidVersion, errors.Errorf(errNoValidVersionFmt, dep.Identifier(), dep.Constraints))
+		log.Debug(errNoValidVersion, "error", errors.Errorf(errFmtNoValidVersion, dep.Identifier(), dep.Constraints))
 		return reconcile.Result{Requeue: false}, nil
 	}
 
@@ -269,6 +286,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		pack = &v1.Configuration{}
 	case v1beta1.ProviderPackageType:
 		pack = &v1.Provider{}
+	case v1beta1.FunctionPackageType:
+		pack = &v1.Function{}
 	default:
 		log.Debug(errInvalidPackageType)
 		return reconcile.Result{Requeue: false}, nil

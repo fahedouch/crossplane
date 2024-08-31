@@ -22,9 +22,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
@@ -60,11 +61,29 @@ func TestResolve(t *testing.T) {
 		args   args
 		want   want
 	}{
+		"SuccessfulInactiveNothingToDo": {
+			reason: "Should return no error if resolve is called for an inactive revision.",
+			args: args{
+				meta: &pkgmetav1.Configuration{},
+				pr: &v1.ConfigurationRevision{
+					Spec: v1.PackageRevisionSpec{
+						Package:      "hasheddan/config-nop-a:v0.0.1",
+						DesiredState: v1.PackageRevisionInactive,
+					},
+				},
+			},
+			want: want{},
+		},
 		"ErrNotMeta": {
 			reason: "Should return error if not a valid package meta type.",
 			args: args{
 				dep:  &PackageDependencyManager{},
 				meta: &v1.Configuration{},
+				pr: &v1.ConfigurationRevision{
+					Spec: v1.PackageRevisionSpec{
+						DesiredState: v1.PackageRevisionActive,
+					},
+				},
 			},
 			want: want{
 				err: errors.New(errNotMeta),
@@ -79,6 +98,11 @@ func TestResolve(t *testing.T) {
 					},
 				},
 				meta: &pkgmetav1.Configuration{},
+				pr: &v1.ConfigurationRevision{
+					Spec: v1.PackageRevisionSpec{
+						DesiredState: v1.PackageRevisionActive,
+					},
+				},
 			},
 			want: want{
 				err: errors.Wrap(errBoom, errGetOrCreateLock),
@@ -104,23 +128,6 @@ func TestResolve(t *testing.T) {
 				err: errors.Wrap(errBoom, errGetOrCreateLock),
 			},
 		},
-		"SuccessfulInactiveNoLock": {
-			reason: "Should not return error if we are inactive and lock does not exist.",
-			args: args{
-				dep: &PackageDependencyManager{
-					client: &test.MockClient{
-						MockGet:    test.NewMockGetFn(kerrors.NewNotFound(schema.GroupResource{}, "")),
-						MockCreate: test.NewMockCreateFn(errBoom),
-					},
-				},
-				meta: &pkgmetav1.Configuration{},
-				pr: &v1.ConfigurationRevision{
-					Spec: v1.PackageRevisionSpec{
-						DesiredState: v1.PackageRevisionInactive,
-					},
-				},
-			},
-		},
 		"ErrBuildDag": {
 			reason: "Should return error if we cannot build DAG.",
 			args: args{
@@ -131,7 +138,7 @@ func TestResolve(t *testing.T) {
 					},
 					newDag: func() dag.DAG {
 						return &dagfake.MockDag{
-							MockInit: func(_ []dag.Node, _ ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, errBoom
 							},
 						}
@@ -145,117 +152,7 @@ func TestResolve(t *testing.T) {
 				},
 			},
 			want: want{
-				err: errBoom,
-			},
-		},
-		"SuccessfulInactiveAlreadyRemoved": {
-			reason: "Should not return error if we are inactive and not in lock.",
-			args: args{
-				dep: &PackageDependencyManager{
-					client: &test.MockClient{
-						MockGet:    test.NewMockGetFn(kerrors.NewNotFound(schema.GroupResource{}, "")),
-						MockCreate: test.NewMockCreateFn(nil),
-					},
-					newDag: func() dag.DAG {
-						return &dagfake.MockDag{
-							MockInit: func(_ []dag.Node, _ ...dag.NodeFn) ([]dag.Node, error) {
-								return nil, nil
-							},
-						}
-					},
-				},
-				meta: &pkgmetav1.Configuration{},
-				pr: &v1.ConfigurationRevision{
-					Spec: v1.PackageRevisionSpec{
-						Package:      "hasheddan/config-nop-a:v0.0.1",
-						DesiredState: v1.PackageRevisionInactive,
-					},
-				},
-			},
-			want: want{
-				err: nil,
-			},
-		},
-		"SuccessfulInactiveExists": {
-			reason: "Should not return error if we are inactive and not in lock.",
-			args: args{
-				dep: &PackageDependencyManager{
-					client: &test.MockClient{
-						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
-							l := obj.(*v1beta1.Lock)
-							l.Packages = []v1beta1.LockPackage{
-								{
-									Source: "hasheddan/config-nop-a:v0.0.1",
-								},
-							}
-							return nil
-						}),
-						MockUpdate: test.NewMockUpdateFn(nil),
-					},
-					newDag: func() dag.DAG {
-						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
-								for i, n := range nodes {
-									for _, f := range fns {
-										f(i, n)
-									}
-								}
-								return nil, nil
-							},
-						}
-					},
-				},
-				meta: &pkgmetav1.Configuration{},
-				pr: &v1.ConfigurationRevision{
-					Spec: v1.PackageRevisionSpec{
-						Package:      "hasheddan/config-nop-a:v0.0.1",
-						DesiredState: v1.PackageRevisionInactive,
-					},
-				},
-			},
-			want: want{
-				err: nil,
-			},
-		},
-		"ErrorRemoveInactiveFromLock": {
-			reason: "Should return error if we are inactive and fail to remove from lock.",
-			args: args{
-				dep: &PackageDependencyManager{
-					client: &test.MockClient{
-						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
-							l := obj.(*v1beta1.Lock)
-							l.Packages = []v1beta1.LockPackage{
-								{
-									Source: "hasheddan/config-nop-a",
-								},
-							}
-							return nil
-						}),
-						MockUpdate: test.NewMockUpdateFn(errBoom),
-					},
-					newDag: func() dag.DAG {
-						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
-								for i, n := range nodes {
-									for _, f := range fns {
-										f(i, n)
-									}
-								}
-								return nil, nil
-							},
-						}
-					},
-				},
-				meta: &pkgmetav1.Configuration{},
-				pr: &v1.ConfigurationRevision{
-					Spec: v1.PackageRevisionSpec{
-						Package:      "hasheddan/config-nop-a:v0.0.1",
-						DesiredState: v1.PackageRevisionInactive,
-					},
-				},
-			},
-			want: want{
-				err: errBoom,
+				err: errors.Wrap(errBoom, errInitDAG),
 			},
 		},
 		"SuccessfulSelfExistNoDependencies": {
@@ -267,6 +164,7 @@ func TestResolve(t *testing.T) {
 							l := obj.(*v1beta1.Lock)
 							l.Packages = []v1beta1.LockPackage{
 								{
+									Name:   "config-nop-a-abc123",
 									Source: "hasheddan/config-nop-a",
 								},
 							}
@@ -275,12 +173,7 @@ func TestResolve(t *testing.T) {
 					},
 					newDag: func() dag.DAG {
 						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
-								for i, n := range nodes {
-									for _, f := range fns {
-										f(i, n)
-									}
-								}
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, nil
 							},
 							MockTraceNode: func(_ string) (map[string]dag.Node, error) {
@@ -291,6 +184,9 @@ func TestResolve(t *testing.T) {
 				},
 				meta: &pkgmetav1.Configuration{},
 				pr: &v1.ConfigurationRevision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "config-nop-a-abc123",
+					},
 					Spec: v1.PackageRevisionSpec{
 						Package:      "hasheddan/config-nop-a:v0.0.1",
 						DesiredState: v1.PackageRevisionActive,
@@ -304,37 +200,21 @@ func TestResolve(t *testing.T) {
 			args: args{
 				dep: &PackageDependencyManager{
 					client: &test.MockClient{
-						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
-							l := obj.(*v1beta1.Lock)
-							l.Packages = []v1beta1.LockPackage{
-								{
-									Source: "hasheddan/config-nop-a",
-									Dependencies: []v1beta1.Dependency{
-										{
-											Package: "not-here-1",
-											Type:    v1beta1.ProviderPackageType,
-										},
-										{
-											Package: "not-here-2",
-											Type:    v1beta1.ConfigurationPackageType,
-										},
-									},
-								},
-							}
+						MockGet: test.NewMockGetFn(nil, func(_ client.Object) error {
 							return nil
 						}),
 						MockUpdate: test.NewMockUpdateFn(nil),
 					},
 					newDag: func() dag.DAG {
 						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, nil
-							},
-							MockAddNode: func(_ dag.Node) error {
-								return nil
 							},
 							MockNodeExists: func(_ string) bool {
 								return false
+							},
+							MockAddNode: func(_ dag.Node) error {
+								return nil
 							},
 							MockAddOrUpdateNodes: func(_ ...dag.Node) {},
 						}
@@ -345,16 +225,19 @@ func TestResolve(t *testing.T) {
 						MetaSpec: pkgmetav1.MetaSpec{
 							DependsOn: []pkgmetav1.Dependency{
 								{
-									Provider: pointer.StringPtr("not-here-1"),
+									Provider: ptr.To("not-here-1"),
 								},
 								{
-									Provider: pointer.StringPtr("not-here-2"),
+									Provider: ptr.To("not-here-2"),
 								},
 							},
 						},
 					},
 				},
 				pr: &v1.ConfigurationRevision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "config-nop-a-abc123",
+					},
 					Spec: v1.PackageRevisionSpec{
 						Package:      "hasheddan/config-nop-a:v0.0.1",
 						DesiredState: v1.PackageRevisionActive,
@@ -363,7 +246,7 @@ func TestResolve(t *testing.T) {
 			},
 			want: want{
 				total: 2,
-				err:   errors.Errorf(errMissingDependenciesFmt, []string{"not-here-1", "not-here-2"}),
+				err:   errors.Errorf(errFmtMissingDependencies, []string{"not-here-1", "not-here-2"}),
 			},
 		},
 		"ErrorSelfExistMissingDependencies": {
@@ -375,6 +258,7 @@ func TestResolve(t *testing.T) {
 							l := obj.(*v1beta1.Lock)
 							l.Packages = []v1beta1.LockPackage{
 								{
+									Name:   "config-nop-a-abc123",
 									Source: "hasheddan/config-nop-a",
 									Dependencies: []v1beta1.Dependency{
 										{
@@ -403,12 +287,7 @@ func TestResolve(t *testing.T) {
 					},
 					newDag: func() dag.DAG {
 						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
-								for i, n := range nodes {
-									for _, f := range fns {
-										f(i, n)
-									}
-								}
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return []dag.Node{
 									&v1beta1.Dependency{
 										Package: "not-here-2",
@@ -433,16 +312,19 @@ func TestResolve(t *testing.T) {
 						MetaSpec: pkgmetav1.MetaSpec{
 							DependsOn: []pkgmetav1.Dependency{
 								{
-									Provider: pointer.StringPtr("not-here-1"),
+									Provider: ptr.To("not-here-1"),
 								},
 								{
-									Provider: pointer.StringPtr("not-here-2"),
+									Provider: ptr.To("not-here-2"),
 								},
 							},
 						},
 					},
 				},
 				pr: &v1.ConfigurationRevision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "config-nop-a-abc123",
+					},
 					Spec: v1.PackageRevisionSpec{
 						Package:      "hasheddan/config-nop-a:v0.0.1",
 						DesiredState: v1.PackageRevisionActive,
@@ -452,7 +334,7 @@ func TestResolve(t *testing.T) {
 			want: want{
 				total:     3,
 				installed: 1,
-				err:       errors.Errorf(errMissingDependenciesFmt, []string{"not-here-2", "not-here-3"}),
+				err:       errors.Errorf(errFmtMissingDependencies, []string{"not-here-2", "not-here-3"}),
 			},
 		},
 		"ErrorSelfExistInvalidDependencies": {
@@ -464,6 +346,7 @@ func TestResolve(t *testing.T) {
 							l := obj.(*v1beta1.Lock)
 							l.Packages = []v1beta1.LockPackage{
 								{
+									Name:   "config-nop-a-abc123",
 									Source: "hasheddan/config-nop-a",
 									Dependencies: []v1beta1.Dependency{
 										{
@@ -492,12 +375,7 @@ func TestResolve(t *testing.T) {
 					},
 					newDag: func() dag.DAG {
 						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
-								for i, n := range nodes {
-									for _, f := range fns {
-										f(i, n)
-									}
-								}
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, nil
 							},
 							MockTraceNode: func(_ string) (map[string]dag.Node, error) {
@@ -530,11 +408,11 @@ func TestResolve(t *testing.T) {
 						MetaSpec: pkgmetav1.MetaSpec{
 							DependsOn: []pkgmetav1.Dependency{
 								{
-									Provider: pointer.StringPtr("not-here-1"),
+									Provider: ptr.To("not-here-1"),
 									Version:  ">=v0.1.0",
 								},
 								{
-									Provider: pointer.StringPtr("not-here-2"),
+									Provider: ptr.To("not-here-2"),
 									Version:  ">=v0.1.0",
 								},
 							},
@@ -542,6 +420,9 @@ func TestResolve(t *testing.T) {
 					},
 				},
 				pr: &v1.ConfigurationRevision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "config-nop-a-abc123",
+					},
 					Spec: v1.PackageRevisionSpec{
 						Package:      "hasheddan/config-nop-a:v0.0.1",
 						DesiredState: v1.PackageRevisionActive,
@@ -552,7 +433,7 @@ func TestResolve(t *testing.T) {
 				total:     3,
 				installed: 3,
 				invalid:   2,
-				err:       errors.Errorf(errIncompatibleDependencyFmt, []string{"not-here-1", "not-here-2"}),
+				err:       errors.Errorf(errFmtIncompatibleDependency, "existing package not-here-1@v0.0.1 is incompatible with constraint >=v0.1.0; existing package not-here-2@v0.0.1 is incompatible with constraint >=v0.1.0"),
 			},
 		},
 		"SuccessfulSelfExistValidDependencies": {
@@ -564,6 +445,7 @@ func TestResolve(t *testing.T) {
 							l := obj.(*v1beta1.Lock)
 							l.Packages = []v1beta1.LockPackage{
 								{
+									Name:   "config-nop-a-abc123",
 									Source: "hasheddan/config-nop-a",
 									Dependencies: []v1beta1.Dependency{
 										{
@@ -573,6 +455,10 @@ func TestResolve(t *testing.T) {
 										{
 											Package: "not-here-2",
 											Type:    v1beta1.ConfigurationPackageType,
+										},
+										{
+											Package: "function-not-here-1",
+											Type:    v1beta1.FunctionPackageType,
 										},
 									},
 								},
@@ -592,19 +478,18 @@ func TestResolve(t *testing.T) {
 					},
 					newDag: func() dag.DAG {
 						return &dagfake.MockDag{
-							MockInit: func(nodes []dag.Node, fns ...dag.NodeFn) ([]dag.Node, error) {
-								for i, n := range nodes {
-									for _, f := range fns {
-										f(i, n)
-									}
-								}
+							MockInit: func(_ []dag.Node) ([]dag.Node, error) {
 								return nil, nil
+							},
+							MockNodeExists: func(_ string) bool {
+								return true
 							},
 							MockTraceNode: func(_ string) (map[string]dag.Node, error) {
 								return map[string]dag.Node{
-									"not-here-1": &v1beta1.Dependency{},
-									"not-here-2": &v1beta1.Dependency{},
-									"not-here-3": &v1beta1.Dependency{},
+									"not-here-1":          &v1beta1.Dependency{},
+									"not-here-2":          &v1beta1.Dependency{},
+									"not-here-3":          &v1beta1.Dependency{},
+									"function-not-here-1": &v1beta1.Dependency{},
 								}, nil
 							},
 							MockGetNode: func(s string) (dag.Node, error) {
@@ -620,6 +505,13 @@ func TestResolve(t *testing.T) {
 										Version: "v0.100.1",
 									}, nil
 								}
+								if s == "function-not-here-1" {
+									return &v1beta1.LockPackage{
+										Source:  "function-not-here-1",
+										Version: "v0.1.0",
+									}, nil
+								}
+
 								return nil, nil
 							},
 						}
@@ -630,11 +522,15 @@ func TestResolve(t *testing.T) {
 						MetaSpec: pkgmetav1.MetaSpec{
 							DependsOn: []pkgmetav1.Dependency{
 								{
-									Provider: pointer.StringPtr("not-here-1"),
+									Provider: ptr.To("not-here-1"),
 									Version:  ">=v0.1.0",
 								},
 								{
-									Provider: pointer.StringPtr("not-here-2"),
+									Provider: ptr.To("not-here-2"),
+									Version:  ">=v0.1.0",
+								},
+								{
+									Function: ptr.To("function-not-here-1"),
 									Version:  ">=v0.1.0",
 								},
 							},
@@ -642,6 +538,9 @@ func TestResolve(t *testing.T) {
 					},
 				},
 				pr: &v1.ConfigurationRevision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "config-nop-a-abc123",
+					},
 					Spec: v1.PackageRevisionSpec{
 						Package:      "hasheddan/config-nop-a:v0.0.1",
 						DesiredState: v1.PackageRevisionActive,
@@ -649,8 +548,8 @@ func TestResolve(t *testing.T) {
 				},
 			},
 			want: want{
-				total:     3,
-				installed: 3,
+				total:     4,
+				installed: 4,
 				invalid:   0,
 			},
 		},

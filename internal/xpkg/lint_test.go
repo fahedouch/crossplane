@@ -20,7 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -31,9 +31,11 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/parser"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
+
 	v1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	pkgmetav1 "github.com/crossplane/crossplane/apis/pkg/meta/v1"
 	pkgmetav1alpha1 "github.com/crossplane/crossplane/apis/pkg/meta/v1alpha1"
+	pkgmetav1beta1 "github.com/crossplane/crossplane/apis/pkg/meta/v1beta1"
 	"github.com/crossplane/crossplane/internal/version"
 	"github.com/crossplane/crossplane/internal/version/fake"
 )
@@ -58,6 +60,11 @@ metadata:
 kind: Configuration
 metadata:
   name: test`)
+
+	v1alpha1FuncBytes = []byte(`apiVersion: meta.pkg.crossplane.io/v1
+  kind: Function
+  metadata:
+    name: test`)
 
 	v1ProvBytes = []byte(`apiVersion: meta.pkg.crossplane.io/v1
 kind: Provider
@@ -87,6 +94,8 @@ metadata:
 	_                = yaml.Unmarshal(v1alpha1ProvBytes, v1alpha1ProvMeta)
 	v1alpha1ConfMeta = &pkgmetav1alpha1.Configuration{}
 	_                = yaml.Unmarshal(v1alpha1ConfBytes, v1alpha1ConfMeta)
+	v1alpha1FuncMeta = &pkgmetav1beta1.Function{}
+	_                = yaml.Unmarshal(v1alpha1FuncBytes, v1alpha1FuncMeta)
 	v1ProvMeta       = &pkgmetav1.Provider{}
 	_                = yaml.Unmarshal(v1ProvBytes, v1ProvMeta)
 	v1ConfMeta       = &pkgmetav1.Configuration{}
@@ -103,11 +112,11 @@ metadata:
 
 func TestOneMeta(t *testing.T) {
 	oneR := bytes.NewReader(bytes.Join([][]byte{v1beta1CRDBytes, v1alpha1ProvBytes}, []byte("\n---\n")))
-	oneMeta, _ := p.Parse(context.TODO(), ioutil.NopCloser(oneR))
+	oneMeta, _ := p.Parse(context.TODO(), io.NopCloser(oneR))
 	noneR := bytes.NewReader(v1beta1CRDBytes)
-	noneMeta, _ := p.Parse(context.TODO(), ioutil.NopCloser(noneR))
+	noneMeta, _ := p.Parse(context.TODO(), io.NopCloser(noneR))
 	multiR := bytes.NewReader(bytes.Join([][]byte{v1alpha1ProvBytes, v1alpha1ProvBytes}, []byte("\n---\n")))
-	multiMeta, _ := p.Parse(context.TODO(), ioutil.NopCloser(multiR))
+	multiMeta, _ := p.Parse(context.TODO(), io.NopCloser(multiR))
 
 	cases := map[string]struct {
 		reason string
@@ -205,6 +214,34 @@ func TestIsConfiguration(t *testing.T) {
 	}
 }
 
+func TestIsFunction(t *testing.T) {
+	cases := map[string]struct {
+		reason string
+		obj    runtime.Object
+		err    error
+	}{
+		"v1alpha1": {
+			reason: "Should not return error if object is a v1alpha1 function.",
+			obj:    v1alpha1FuncMeta,
+		},
+		"ErrNotFunction": {
+			reason: "Should return error if object is not function.",
+			obj:    v1beta1crd,
+			err:    errors.New(errNotMetaFunction),
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := IsFunction(tc.obj)
+
+			if diff := cmp.Diff(tc.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\nIsFunction(...): -want error, +got error:\n%s", tc.reason, diff)
+			}
+		})
+	}
+}
+
 func TestPackageCrossplaneCompatible(t *testing.T) {
 	crossplaneConstraint := ">v0.13.0"
 	errBoom := errors.New("boom")
@@ -258,7 +295,7 @@ func TestPackageCrossplaneCompatible(t *testing.T) {
 					MockGetVersionString: fake.NewMockGetVersionStringFn("v0.12.0"),
 				},
 			},
-			err: errors.Wrapf(errBoom, errCrossplaneIncompatibleFmt, "v0.12.0"),
+			err: errors.Wrapf(errBoom, errFmtCrossplaneIncompatible, "v0.12.0"),
 		},
 		"ErrOutsideConstraints": {
 			reason: "Should return error if Crossplane version outside constraints.",
@@ -277,7 +314,7 @@ func TestPackageCrossplaneCompatible(t *testing.T) {
 					MockGetVersionString: fake.NewMockGetVersionStringFn("v0.12.0"),
 				},
 			},
-			err: errors.Errorf(errCrossplaneIncompatibleFmt, "v0.12.0"),
+			err: errors.Errorf(errFmtCrossplaneIncompatible, "v0.12.0"),
 		},
 		"ErrNotMeta": {
 			reason: "Should return error if object is not a meta package type.",

@@ -3,74 +3,15 @@ name: Comment Commands
 on: issue_comment
 
 jobs:
-  points:
-    runs-on: ubuntu-18.04
-    if: startsWith(github.event.comment.body, '/points')
-
-    steps:
-    - name: Extract Command
-      id: command
-      uses: xt0rted/slash-command-action@v1
-      with:
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        command: points
-        reaction: "true"
-        reaction-type: "eyes"
-        allow-edits: "false"
-        permission-level: write
-    - name: Handle Command
-      uses: actions/github-script@v4
-      env:
-        POINTS: ${{ steps.command.outputs.command-arguments }}
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          const points = process.env.POINTS
-
-          if (isNaN(parseInt(points))) {
-            console.log("Malformed command - expected '/points <int>'")
-            github.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: "confused"
-            })
-            return
-          }
-          const label = "points/" + points
-
-          // Delete our needs-points-label label.
-          try {
-            await github.issues.deleteLabel({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: ['needs-points-label']
-            })
-            console.log("Deleted 'needs-points-label' label.")
-          }
-          catch(e) {
-            console.log("Label 'needs-points-label' probably didn't exist.")
-          }
-
-          // Add our points label.
-          github.issues.addLabels({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            labels: [label]
-          })
-          console.log("Added '" + label + "' label.")
-
   # NOTE(negz): See also backport.yml, which is the variant that triggers on PR
   # merge rather than on comment.
   backport:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-22.04
     if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/backport')
     steps:
     - name: Extract Command
       id: command
-      uses: xt0rted/slash-command-action@v1
+      uses: xt0rted/slash-command-action@bf51f8f5f4ea3d58abc7eca58f77104182b23e88 # v2
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         command: backport
@@ -80,13 +21,34 @@ jobs:
         permission-level: write
 
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
       with:
         fetch-depth: 0
 
     - name: Open Backport PR
-      uses: zeebe-io/backport-action@v0.0.4
+      uses: zeebe-io/backport-action@ef20d86abccbac3ee3a73cb2efbdc06344c390e5 # v2.5.0
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         github_workspace: ${{ github.workspace }}
         version: v0.0.4
+
+  fresh:
+    runs-on: ubuntu-22.04
+    if: startsWith(github.event.comment.body, '/fresh')
+
+    steps:
+    - name: Extract Command
+      id: command
+      uses: xt0rted/slash-command-action@bf51f8f5f4ea3d58abc7eca58f77104182b23e88 # v2
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        command: fresh
+        reaction: "true"
+        reaction-type: "eyes"
+        allow-edits: "false"
+        permission-level: read
+    - name: Handle Command
+      uses: actions-ecosystem/action-remove-labels@2ce5d41b4b6aa8503e285553f75ed56e0a40bae0 # v1
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        labels: stale

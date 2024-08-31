@@ -22,8 +22,10 @@ import (
 	"github.com/crossplane/crossplane/internal/dag"
 )
 
-var _ dag.Node = &Dependency{}
-var _ dag.Node = &LockPackage{}
+var (
+	_ dag.Node = &Dependency{}
+	_ dag.Node = &LockPackage{}
+)
 
 // A PackageType is a type of package.
 type PackageType string
@@ -32,6 +34,7 @@ type PackageType string
 const (
 	ConfigurationPackageType PackageType = "Configuration"
 	ProviderPackageType      PackageType = "Provider"
+	FunctionPackageType      PackageType = "Function"
 )
 
 // LockPackage is a package that is in the lock.
@@ -57,7 +60,6 @@ type LockPackage struct {
 func ToNodes(pkgs ...LockPackage) []dag.Node {
 	nodes := make([]dag.Node, len(pkgs))
 	for i, r := range pkgs {
-		r := r // Pin range variable so we can take its address.
 		nodes[i] = &r
 	}
 	return nodes
@@ -72,7 +74,6 @@ func (l *LockPackage) Identifier() string {
 func (l *LockPackage) Neighbors() []dag.Node {
 	nodes := make([]dag.Node, len(l.Dependencies))
 	for i, r := range l.Dependencies {
-		r := r // Pin range variable so we can take its address.
 		nodes[i] = &r
 	}
 	return nodes
@@ -81,7 +82,7 @@ func (l *LockPackage) Neighbors() []dag.Node {
 // AddNeighbors adds dependencies to a LockPackage. A LockPackage should always
 // have all dependencies declared before being added to the Lock, so we no-op
 // when adding a neighbor.
-func (l *LockPackage) AddNeighbors(nodes ...dag.Node) error {
+func (l *LockPackage) AddNeighbors(_ ...dag.Node) error {
 	return nil
 }
 

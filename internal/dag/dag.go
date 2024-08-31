@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package dag implements a Directed Acyclic Graph for Package dependencies.
 package dag
 
 import (
@@ -28,15 +29,15 @@ type Node interface {
 	// Node implementations should be careful to establish uniqueness of
 	// neighbors in their AddNeighbors method or risk counting a neighbor
 	// multiple times.
-	AddNeighbors(...Node) error
+	AddNeighbors(ns ...Node) error
 }
 
 // DAG is a Directed Acyclic Graph.
-type DAG interface {
-	Init(nodes []Node, fns ...NodeFn) ([]Node, error)
-	AddNode(Node) error
-	AddNodes(...Node) error
-	AddOrUpdateNodes(...Node)
+type DAG interface { //nolint:interfacebloat // TODO(negz): Could this be several smaller interfaces?
+	Init(ns []Node) ([]Node, error)
+	AddNode(n Node) error
+	AddNodes(ns ...Node) error
+	AddOrUpdateNodes(ns ...Node)
 	GetNode(identifier string) (Node, error)
 	AddEdge(from string, to Node) (bool, error)
 	AddEdges(edges map[string][]Node) ([]Node, error)
@@ -52,20 +53,6 @@ type MapDag struct {
 	nodes map[string]Node
 }
 
-// NodeFn performs executes a function on each node.
-type NodeFn func(int, Node)
-
-// FindIndex searches for the index of a specific node. The passed index
-// parameter will be updated to the index of the node if found, or left
-// unchanged if not.
-func FindIndex(identifier string, index *int) NodeFn {
-	return func(i int, n Node) {
-		if n.Identifier() == identifier {
-			*index = i
-		}
-	}
-}
-
 // NewDAGFn is a function that returns a DAG.
 type NewDAGFn func() DAG
 
@@ -76,18 +63,15 @@ func NewMapDag() DAG {
 
 // Init initializes a MapDag and implies missing destination nodes. Any implied
 // nodes are returned. Any existing nodes are cleared.
-func (d *MapDag) Init(nodes []Node, fns ...NodeFn) ([]Node, error) {
+func (d *MapDag) Init(nodes []Node) ([]Node, error) {
 	d.nodes = map[string]Node{}
 	// Add all nodes before adding edges so we know what nodes were implied.
-	for i, node := range nodes {
+	for _, node := range nodes {
 		if err := d.AddNode(node); err != nil {
 			return nil, err
 		}
-		for _, f := range fns {
-			f(i, node)
-		}
 	}
-	var implied []Node // nolint:prealloc
+	var implied []Node
 	for _, node := range nodes {
 		miss, err := d.AddEdges(map[string][]Node{
 			node.Identifier(): node.Neighbors(),
@@ -113,7 +97,7 @@ func (d *MapDag) AddNodes(nodes ...Node) error {
 // AddNode adds a node to the graph.
 func (d *MapDag) AddNode(node Node) error {
 	if _, ok := d.nodes[node.Identifier()]; ok {
-		return errors.New("node already exists")
+		return errors.Errorf("node %s already exists", node.Identifier())
 	}
 	d.nodes[node.Identifier()] = node
 	return nil
@@ -136,7 +120,7 @@ func (d *MapDag) NodeExists(identifier string) bool {
 // NodeNeighbors returns a node's neighbors.
 func (d *MapDag) NodeNeighbors(identifier string) ([]Node, error) {
 	if _, ok := d.nodes[identifier]; !ok {
-		return nil, errors.New("node does not exist")
+		return nil, errors.Errorf("node %s does not exist", identifier)
 	}
 	return d.nodes[identifier].Neighbors(), nil
 }
@@ -229,6 +213,9 @@ func (d *MapDag) visit(name string, neighbors []Node, stack map[string]bool, vis
 	stack[name] = true
 	for _, n := range neighbors {
 		if !visited[n.Identifier()] {
+			if _, ok := d.nodes[n.Identifier()]; !ok {
+				return errors.Errorf("node %q does not exist", n.Identifier())
+			}
 			if err := d.visit(n.Identifier(), d.nodes[n.Identifier()].Neighbors(), stack, visited, results); err != nil {
 				return err
 			}

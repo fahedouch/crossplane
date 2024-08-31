@@ -21,9 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"path/filepath"
 
 	"github.com/google/go-containerregistry/pkg/authn/k8schain"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -36,7 +34,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 )
 
-func init() {
+func init() { //nolint:gochecknoinits // See comment below.
 	// NOTE(hasheddan): we set the logrus package-level logger to discard output
 	// due to the fact that the AWS ECR credential helper uses it to log errors
 	// when parsing registry server URL, which happens any time a package is
@@ -54,38 +52,17 @@ type Fetcher interface {
 
 // K8sFetcher uses kubernetes credentials to fetch package images.
 type K8sFetcher struct {
-	client    kubernetes.Interface
-	namespace string
-	transport http.RoundTripper
+	client         kubernetes.Interface
+	namespace      string
+	serviceAccount string
+	transport      http.RoundTripper
+	userAgent      string
 }
 
-// FetcherOpt can be used to add optional parameters to NewK8sFetcher
+// FetcherOpt can be used to add optional parameters to NewK8sFetcher.
 type FetcherOpt func(k *K8sFetcher) error
 
-// ParseCertificatesFromPath parses PEM file containing extra x509
-// certificates(s) and combines them with the built in root CA CertPool.
-func ParseCertificatesFromPath(path string) (*x509.CertPool, error) {
-	// Get the SystemCertPool, continue with an empty pool on error
-	rootCAs, _ := x509.SystemCertPool()
-	if rootCAs == nil {
-		rootCAs = x509.NewCertPool()
-	}
-
-	// Read in the cert file
-	certs, err := ioutil.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, errors.Wrapf(err, "Failed to append %q to RootCAs", path)
-	}
-
-	// Append our cert to the system pool
-	if ok := rootCAs.AppendCertsFromPEM(certs); !ok {
-		return nil, errors.Errorf("No certificates could be parsed from %q", path)
-	}
-
-	return rootCAs, nil
-}
-
-// WithCustomCA is a FetcherOpt that can be used to add a custom CA bundle to a K8sFetcher
+// WithCustomCA is a FetcherOpt that can be used to add a custom CA bundle to a K8sFetcher.
 func WithCustomCA(rootCAs *x509.CertPool) FetcherOpt {
 	return func(k *K8sFetcher) error {
 		t, ok := k.transport.(*http.Transport)
@@ -98,12 +75,46 @@ func WithCustomCA(rootCAs *x509.CertPool) FetcherOpt {
 	}
 }
 
+// WithUserAgent is a FetcherOpt that can be used to set the user agent on all HTTP requests.
+func WithUserAgent(userAgent string) FetcherOpt {
+	return func(k *K8sFetcher) error {
+		// TODO(hasheddan): go-containerregistry currently does not allow for
+		// removal of the go-containerregistry user-agent header, so the
+		// provided one is appended rather than replacing. In the future, this
+		// should be replaced with wrapping the transport with
+		// transport.NewUserAgent.
+		k.userAgent = userAgent
+		return nil
+	}
+}
+
+// WithNamespace is a FetcherOpt that sets the Namespace for fetching package
+// pull secrets.
+func WithNamespace(ns string) FetcherOpt {
+	return func(k *K8sFetcher) error {
+		k.namespace = ns
+		return nil
+	}
+}
+
+// WithServiceAccount is a FetcherOpt that sets the ServiceAccount name for
+// fetching package pull secrets.
+func WithServiceAccount(sa string) FetcherOpt {
+	return func(k *K8sFetcher) error {
+		k.serviceAccount = sa
+		return nil
+	}
+}
+
 // NewK8sFetcher creates a new K8sFetcher.
-func NewK8sFetcher(client kubernetes.Interface, namespace string, opts ...FetcherOpt) (*K8sFetcher, error) {
+func NewK8sFetcher(client kubernetes.Interface, opts ...FetcherOpt) (*K8sFetcher, error) {
+	dt, ok := remote.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.Errorf("default transport was not a %T", &http.Transport{})
+	}
 	k := &K8sFetcher{
 		client:    client,
-		namespace: namespace,
-		transport: remote.DefaultTransport.Clone(),
+		transport: dt.Clone(),
 	}
 
 	for _, o := range opts {
@@ -118,37 +129,68 @@ func NewK8sFetcher(client kubernetes.Interface, namespace string, opts ...Fetche
 // Fetch fetches a package image.
 func (i *K8sFetcher) Fetch(ctx context.Context, ref name.Reference, secrets ...string) (v1.Image, error) {
 	auth, err := k8schain.New(ctx, i.client, k8schain.Options{
-		Namespace:        i.namespace,
-		ImagePullSecrets: secrets,
+		Namespace:          i.namespace,
+		ServiceAccountName: i.serviceAccount,
+		ImagePullSecrets:   secrets,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return remote.Image(ref, remote.WithAuthFromKeychain(auth), remote.WithTransport(i.transport), remote.WithContext(ctx))
+	return remote.Image(ref,
+		remote.WithAuthFromKeychain(auth),
+		remote.WithTransport(i.transport),
+		remote.WithContext(ctx),
+		remote.WithUserAgent(i.userAgent),
+	)
 }
 
 // Head fetches a package descriptor.
 func (i *K8sFetcher) Head(ctx context.Context, ref name.Reference, secrets ...string) (*v1.Descriptor, error) {
 	auth, err := k8schain.New(ctx, i.client, k8schain.Options{
-		Namespace:        i.namespace,
-		ImagePullSecrets: secrets,
+		Namespace:          i.namespace,
+		ServiceAccountName: i.serviceAccount,
+		ImagePullSecrets:   secrets,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return remote.Head(ref, remote.WithAuthFromKeychain(auth), remote.WithTransport(i.transport), remote.WithContext(ctx))
+	d, err := remote.Head(ref,
+		remote.WithAuthFromKeychain(auth),
+		remote.WithTransport(i.transport),
+		remote.WithContext(ctx),
+		remote.WithUserAgent(i.userAgent),
+	)
+	if err != nil || d == nil {
+		rd, gErr := remote.Get(ref,
+			remote.WithAuthFromKeychain(auth),
+			remote.WithTransport(i.transport),
+			remote.WithContext(ctx),
+			remote.WithUserAgent(i.userAgent),
+		)
+		if gErr != nil {
+			return nil, errors.Wrapf(gErr, "failed to fetch package descriptor with a GET request after a previous HEAD request failure: %v", err)
+		}
+		return &rd.Descriptor, nil
+	}
+	return d, nil
 }
 
 // Tags fetches a package's tags.
 func (i *K8sFetcher) Tags(ctx context.Context, ref name.Reference, secrets ...string) ([]string, error) {
 	auth, err := k8schain.New(ctx, i.client, k8schain.Options{
-		Namespace:        i.namespace,
-		ImagePullSecrets: secrets,
+		Namespace:          i.namespace,
+		ServiceAccountName: i.serviceAccount,
+		ImagePullSecrets:   secrets,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return remote.List(ref.Context(), remote.WithAuthFromKeychain(auth), remote.WithTransport(i.transport), remote.WithContext(ctx))
+	return remote.List(ref.Context(),
+		remote.WithAuthFromKeychain(auth),
+		remote.WithTransport(i.transport),
+		remote.WithContext(ctx),
+		remote.WithUserAgent(i.userAgent),
+	)
 }
 
 // NopFetcher always returns an empty image and never returns error.
@@ -160,16 +202,16 @@ func NewNopFetcher() *NopFetcher {
 }
 
 // Fetch fetches an empty image and does not return error.
-func (n *NopFetcher) Fetch(ctx context.Context, ref name.Reference, secrets ...string) (v1.Image, error) {
+func (n *NopFetcher) Fetch(_ context.Context, _ name.Reference, _ ...string) (v1.Image, error) {
 	return empty.Image, nil
 }
 
 // Head returns a nil descriptor and does not return error.
-func (n *NopFetcher) Head(ctx context.Context, ref name.Reference, secrets ...string) (*v1.Descriptor, error) {
+func (n *NopFetcher) Head(_ context.Context, _ name.Reference, _ ...string) (*v1.Descriptor, error) {
 	return nil, nil
 }
 
 // Tags returns a nil slice and does not return error.
-func (n *NopFetcher) Tags(ctx context.Context, ref name.Reference, secrets ...string) ([]string, error) {
+func (n *NopFetcher) Tags(_ context.Context, _ name.Reference, _ ...string) ([]string, error) {
 	return nil, nil
 }

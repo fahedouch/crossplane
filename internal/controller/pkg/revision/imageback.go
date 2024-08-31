@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/validate"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/parser"
@@ -38,12 +39,17 @@ const (
 	errFetchLayer              = "failed to fetch annotated base layer from remote"
 	errGetUncompressed         = "failed to get uncompressed contents from layer"
 	errMultipleAnnotatedLayers = "package is invalid due to multiple annotated base layers"
-	errOpenPackageStream       = "failed to open package stream file"
+	errFmtNoPackageFileFound   = "couldn't find \"" + xpkg.StreamFile + "\" file after checking %d files in the archive (annotated layer: %v)"
+	errFmtMaxManifestLayers    = "package has %d layers, but only %d are allowed"
+	errValidateLayer           = "invalid package layer"
+	errValidateImage           = "invalid package image"
 )
 
 const (
 	layerAnnotation     = "io.crossplane.xpkg"
 	baseAnnotationValue = "base"
+	// maxLayers is the maximum number of layers an image can have.
+	maxLayers = 256
 )
 
 // ImageBackend is a backend for parser.
@@ -74,8 +80,7 @@ func NewImageBackend(fetcher xpkg.Fetcher, opts ...ImageBackendOption) *ImageBac
 }
 
 // Init initializes an ImageBackend.
-// NOTE(hasheddan): this method is slightly over our cyclomatic complexity goal
-func (i *ImageBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io.ReadCloser, error) { //nolint:gocyclo
+func (i *ImageBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io.ReadCloser, error) {
 	// NOTE(hasheddan): we use nestedBackend here because simultaneous
 	// reconciles of providers or configurations can lead to the package
 	// revision being overwritten mid-execution in the shared image backend when
@@ -102,6 +107,12 @@ func (i *ImageBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io
 	if err != nil {
 		return nil, errors.Wrap(err, errGetManifest)
 	}
+
+	// Check that the image has less than the maximum allowed number of layers.
+	if nLayers := len(manifest.Layers); nLayers > maxLayers {
+		return nil, errors.Errorf(errFmtMaxManifestLayers, nLayers, maxLayers)
+	}
+
 	// Determine if the image is using annotated layers.
 	var tarc io.ReadCloser
 	foundAnnotated := false
@@ -122,6 +133,9 @@ func (i *ImageBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io
 		if err != nil {
 			return nil, errors.Wrap(err, errFetchLayer)
 		}
+		if err := validate.Layer(layer); err != nil {
+			return nil, errors.Wrap(err, errValidateLayer)
+		}
 		tarc, err = layer.Uncompressed()
 		if err != nil {
 			return nil, errors.Wrap(err, errGetUncompressed)
@@ -130,6 +144,9 @@ func (i *ImageBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io
 
 	// If we still don't have content then we need to flatten image filesystem.
 	if !foundAnnotated {
+		if err := validate.Image(img); err != nil {
+			return nil, errors.Wrap(err, errValidateImage)
+		}
 		tarc = mutate.Extract(img)
 	}
 
@@ -137,14 +154,16 @@ func (i *ImageBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io
 	// layer contents or flattened filesystem content. Either way, we only want
 	// the package YAML stream.
 	t := tar.NewReader(tarc)
+	var read int
 	for {
 		h, err := t.Next()
 		if err != nil {
-			return nil, errors.Wrap(err, errOpenPackageStream)
+			return nil, errors.Wrapf(err, errFmtNoPackageFileFound, read, foundAnnotated)
 		}
 		if h.Name == xpkg.StreamFile {
 			break
 		}
+		read++
 	}
 
 	// NOTE(hasheddan): we return a JoinedReadCloser such that closing will free
@@ -164,7 +183,7 @@ type nestedBackend struct {
 
 // Init is a nop because nestedBackend does not actually meant to act as a
 // parser backend.
-func (n *nestedBackend) Init(ctx context.Context, bo ...parser.BackendOption) (io.ReadCloser, error) {
+func (n *nestedBackend) Init(_ context.Context, _ ...parser.BackendOption) (io.ReadCloser, error) {
 	return nil, nil
 }
 

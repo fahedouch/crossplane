@@ -14,17 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package rbac implements the controllers of the Crossplane RBAC manager.
 package rbac
 
 import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/crossplane/crossplane/internal/controller/rbac/controller"
 	"github.com/crossplane/crossplane/internal/controller/rbac/definition"
-	"github.com/crossplane/crossplane/internal/controller/rbac/namespace"
 	"github.com/crossplane/crossplane/internal/controller/rbac/provider/binding"
 	"github.com/crossplane/crossplane/internal/controller/rbac/provider/roles"
-
-	"github.com/crossplane/crossplane/internal/controller/rbac/controller"
 )
 
 // Setup RBAC manager controllers.
@@ -38,10 +37,5 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 			return err
 		}
 	}
-
-	if o.ManagementPolicy != controller.ManagementPolicyAll {
-		return nil
-	}
-
-	return namespace.Setup(mgr, o)
+	return nil
 }
